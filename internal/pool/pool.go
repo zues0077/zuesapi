@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -67,6 +68,8 @@ type Status struct {
 	ModelCooling map[string]time.Time `json:"model_cooling,omitempty"`
 	// LastUsedAt 最近一次真正发起调用的时间，零值 = 从未调用。仅面板展示。
 	LastUsedAt time.Time `json:"last_used_at,omitempty"`
+	// Pinned 该账号是否被「快速切号」置顶（后续新请求优先走它）。仅面板展示。
+	Pinned bool `json:"pinned,omitempty"`
 }
 
 type entry struct {
@@ -145,8 +148,9 @@ func (e *entry) healthyForModel(now time.Time, model string) bool {
 // 读入后这些账号的余额口径不可信（pool 会置 creditsStale）。
 // 缺失/零值视为 1（保持向后兼容：老文件不报错）。
 type stateFile struct {
-	Version  int                     `json:"version,omitempty"`
-	RRLast   string                  `json:"rr_last,omitempty"` // roundrobin 游标：上次选中的 uid
+	Version  int    `json:"version,omitempty"`
+	RRLast   string `json:"rr_last,omitempty"`     // roundrobin 游标：上次选中的 uid
+	PinnedUID string `json:"pinned_uid,omitempty"` // 快速切号：置顶账号（空 = 自动轮换）
 	Accounts map[string]accountState `json:"accounts"`
 }
 
@@ -179,6 +183,10 @@ type Pool struct {
 	strategy Strategy
 	// rrLast roundrobin 游标：上次选中的 uid。落盘，重启后继续往下轮。
 	rrLast string
+	// pinnedUID 快速切号：置顶账号（空 = 自动轮换）。落盘，重启后保持。
+	// 置顶账号 healthy 时新请求恒走它；不 healthy（冷却/禁用/模型限流/已被
+	// 请求级排除）时自动回落到原策略 —— 保证任务不因切号被打断。
+	pinnedUID string
 }
 
 // New 构建池；stateFp 非空时尝试加载旧状态。
@@ -254,6 +262,16 @@ func (p *Pool) PickExcludingForModel(tried map[string]bool, model string) *auth.
 	cands := p.candidates(now, tried, model)
 	if len(cands) == 0 {
 		return nil
+	}
+
+	// 快速切号：置顶账号可用时新请求恒走它（在 tried/冷却/模型冷却过滤之后判断，
+	// 置顶号不可用则自然回落到原策略，任务不丢）。
+	if p.pinnedUID != "" {
+		for _, e := range cands {
+			if e.a.UID == p.pinnedUID {
+				return e.a
+			}
+		}
 	}
 
 	switch p.strategy {
@@ -363,6 +381,30 @@ func (p *Pool) SetStrategy(s Strategy) {
 	}
 	p.strategy = s
 	p.saveLocked()
+}
+
+// Pin 快速切号：置顶账号（uid 为空 = 取消置顶，恢复自动轮换）。落盘持久化。
+func (p *Pool) Pin(uid string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	uid = strings.TrimSpace(uid)
+	if p.pinnedUID == uid {
+		return
+	}
+	if uid != "" {
+		if _, ok := p.byUID[uid]; !ok {
+			return // 池里没有这个账号，拒绝置顶（防止脏数据）
+		}
+	}
+	p.pinnedUID = uid
+	p.saveLocked()
+}
+
+// PinnedUID 返回当前置顶账号（空 = 自动轮换）。
+func (p *Pool) PinnedUID() string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.pinnedUID
 }
 
 // GetStrategy 返回当前策略。
@@ -631,6 +673,7 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		LastCheckinMsg:  e.lastCheckinMsg,
 		ModelCooling:    mc,
 		LastUsedAt:      e.lastUsedAt,
+		Pinned:          p.pinnedUID != "" && uid == p.pinnedUID,
 	}
 }
 
@@ -648,6 +691,7 @@ func (p *Pool) load() {
 		return
 	}
 	p.rrLast = sf.RRLast
+	p.pinnedUID = sf.PinnedUID
 	// 旧格式（v2.2.0 及之前无 unusable；v2 无 expiring）：余额口径与新版不一致（可用/不可用/临期拆分），
 	// 读入后置 creditsStale，待自动刷新循环首刷时重算并清除。
 	// 新文件带 version>=stateVersion，且带 unusable 字段才视为可信。
@@ -674,7 +718,7 @@ func (p *Pool) saveLocked() {
 	if p.stateFp == "" {
 		return
 	}
-	sf := stateFile{Version: stateVersion, RRLast: p.rrLast, Accounts: map[string]accountState{}}
+	sf := stateFile{Version: stateVersion, RRLast: p.rrLast, PinnedUID: p.pinnedUID, Accounts: map[string]accountState{}}
 	now := time.Now()
 	for uid, e := range p.byUID {
 		var mc map[string]time.Time

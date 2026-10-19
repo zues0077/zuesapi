@@ -194,6 +194,10 @@ body {
    只用 --ok 的低透明度派生色，避免与冷却/停用的配色冲突。 */
 .acct-card.in-use { border-color: rgba(22,163,74,.35); background: #f4fdf7; }
 
+/* 快速切号置顶的整卡高亮：紫色系（与调用中/冷却/停用配色区分），边框加粗强调。 */
+.acct-card.pinned { border-color: rgba(124,58,237,.55); border-width: 2px; background: #faf5ff; }
+.icon-op.pin-on { color: #7c3aed; border-color: #7c3aed; background: #f5f3ff; }
+
 .acct-card .acct-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 6px; }
 .acct-card .acct-name { font-weight: 600; font-size: 14px; }
 .acct-card .acct-uid { font-size: 11px; color: var(--muted); }

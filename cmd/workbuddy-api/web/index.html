@@ -71,6 +71,8 @@
           <button class="btn primary alt qwenwork" id="btnAddQwen" style="grid-column:3;grid-row:2">＋ 千问办公</button>
           <button class="btn primary alt raccoon" id="btnAddRaccoon" style="grid-column:4;grid-row:2">＋ 小浣熊</button>
           <button class="btn primary alt glm" id="btnAddGLM" style="grid-column:5;grid-row:2" title="体验渠道：仅文本对话，不支持工具调用/多模态">＋ 智谱清言</button>
+          <button class="btn primary alt" id="btnAddJSON" style="grid-column:1;grid-row:3"
+            title="粘贴凭据 JSON 直接添加账号（全渠道兜底，支持嵌套 auths 格式与扁平格式）">⌨ JSON 登录</button>
         </div>
       </div>
     </div>
@@ -263,6 +265,38 @@
     </div>
     <div class="modal-actions">
       <button class="btn small" id="btnGLMCancel">关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- JSON 登录弹层：粘贴凭据 JSON 直接添加账号（全渠道兜底） -->
+<div class="overlay hidden" id="jsonLoginOverlay">
+  <div class="modal modal-wide">
+    <div class="modal-title">JSON 登录（粘贴凭据添加账号）</div>
+    <div class="modal-body settings-body">
+      <div class="row">
+        <label class="lbl wide">渠道</label>
+        <select id="jsonChannel" class="select grow"></select>
+      </div>
+      <div class="row" style="align-items:flex-start">
+        <label class="lbl wide">凭据 JSON</label>
+        <textarea id="jsonPayload" class="input grow" rows="9" spellcheck="false"
+          placeholder='两种格式均可：&#10;① 嵌套（与 auths/*.json 一致）&#10;{"auth":{"accessToken":"…","refreshToken":"…","expiresAt":0,"domain":""},"account":{"uid":"…","nickname":"…"}}&#10;② 扁平&#10;{"accessToken":"…","refreshToken":"…","expiresIn":3600,"uid":"…"}&#10;&#10;说明：uid 缺失时会从 access_token(JWT) 自动推导；glm 渠道可只填 refreshToken。'></textarea>
+      </div>
+      <div class="hint">落盘格式与加密策略和浏览器登录完全一致，token 只保存在本机 <code>auths/</code>。</div>
+      <div class="cfg-section">
+        <div class="cfg-heading">从现有账号导出（获取 JSON 的另一种方式）</div>
+        <div class="row">
+          <select id="jsonExportAcct" class="select grow" title="选择本机已有账号"></select>
+          <button class="btn small" id="btnJSONExport">导出到上面</button>
+        </div>
+        <div class="hint">导出的是<b>明文凭据</b>（解回 DPAPI 加密前的原始 token），等同于账号本身：可用于迁移到别的机器、备份，请勿外传。</div>
+      </div>
+      <div class="hint" id="jsonLoginErr" style="color:var(--danger)"></div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn small" id="btnJSONCancel">取消</button>
+      <button class="btn small primary" id="btnJSONSubmit">验证并添加</button>
     </div>
   </div>
 </div>

@@ -604,6 +604,7 @@ function renderAccounts() {
       : `${checkinBtn}
           ${taskBtn}
           <span class="icon-op" title="刷新积分" onclick="refreshOne('${a.uid}')">↻</span>
+          <span class="icon-op${a.pinned ? " pin-on" : ""}" title="${a.pinned ? "当前账号（快速切号中，点击取消恢复自动轮换）" : "快速切号：后续新请求优先走此账号（进行中的会话不受影响，任务不丢失）"}" onclick="switchAcct('${a.uid}',${!!a.pinned})">${a.pinned ? "📌" : "⇄"}</span>
           <span class="icon-op warn" title="${disableTitle}" onclick="toggleDisable('${a.uid}',${a.disabled})">${disableIcon}</span>
           <span class="icon-op danger" title="删除账号" onclick="removeAcct('${a.uid}')">✕</span>`;
     // 显示名：点击直接弹出改名框（无积分渠道降级为普通文本）。
@@ -619,7 +620,7 @@ function renderAccounts() {
     const liveTag = `<span class="acct-live-slot">${liveTagHtml(a)}</span>`;
 
     return `
-    <div class="acct-card${disabledClass}${coolingClass}${a.in_use ? " in-use" : ""}" data-uid="${esc(a.uid)}">
+    <div class="acct-card${disabledClass}${coolingClass}${a.pinned ? " pinned" : ""}${a.in_use ? " in-use" : ""}" data-uid="${esc(a.uid)}">
       <div class="acct-top">
         <div>
           <span class="badge ${group}">${groupName}</span>
@@ -1023,6 +1024,18 @@ async function refreshOne(uid) {
   } catch (e) { toast(e.message); }
 }
 
+// switchAcct 快速切号：把该账号置顶为优先账号（再点一次取消，恢复自动轮换）。
+// 已绑定的粘性会话不受影响（任务不丢）；置顶号冷却/禁用时自动回落原策略。
+async function switchAcct(uid, currentlyPinned) {
+  try {
+    const r = await api("/api/account/switch", { uid: currentlyPinned ? "" : uid });
+    toast(currentlyPinned
+      ? "已取消切号，恢复自动轮换"
+      : `切号完成：${r.nickname || "该账号"} 已置顶，后续新请求优先走它（进行中的会话不受影响）`);
+    loadState();
+  } catch (e) { toast(e.message); }
+}
+
 async function toggleDisable(uid, currentlyDisabled) {
   const action = currentlyDisabled ? "启用" : "停用";
   confirmDialog(`确定${action}该账号？${currentlyDisabled ? "" : "停用后路由不会分配给该账号。"}`, async () => {
@@ -1327,6 +1340,80 @@ function confirmLogin() {
   // 按 pendingAction 分发：小浣熊两种动作都支持，不能只看渠道是否属于导入型。
   if (pendingAction === "import") importLocal(pendingChannel);
   else startLogin(pendingChannel);
+}
+
+// ---------- JSON 登录 ----------
+// 粘贴凭据 JSON 直接添加账号（全渠道兜底）：嵌套 auths/*.json 格式或扁平格式。
+function promptJSONLogin() {
+  const sel = $("jsonChannel");
+  if (!sel.options.length) {
+    for (const [k, name] of Object.entries(CH_LABEL)) {
+      if (k === "traecode") continue; // 与 traework 共账号，不单列
+      const opt = document.createElement("option");
+      opt.value = k; opt.textContent = name;
+      sel.appendChild(opt);
+    }
+  }
+  $("jsonPayload").value = "";
+  $("jsonLoginErr").textContent = "";
+  fillJSONExportAccounts();
+  $("jsonLoginOverlay").classList.remove("hidden");
+  $("jsonPayload").focus();
+}
+
+// fillJSONExportAccounts 用当前账号池填充「从现有账号导出」下拉框。
+function fillJSONExportAccounts() {
+  const sel = $("jsonExportAcct");
+  sel.innerHTML = "";
+  const accts = (state && state.accounts) || [];
+  if (!accts.length) {
+    const opt = document.createElement("option");
+    opt.value = ""; opt.textContent = "（本机还没有账号）";
+    sel.appendChild(opt);
+    return;
+  }
+  for (const a of accts) {
+    const opt = document.createElement("option");
+    opt.value = a.uid;
+    opt.textContent = `${chLabel(a.group)} · ${a.nickname || a.uid}`;
+    sel.appendChild(opt);
+  }
+}
+
+// exportJSONAccount 把选中账号的凭据导出为嵌套 JSON，填进上面的输入框。
+async function exportJSONAccount() {
+  const uid = $("jsonExportAcct").value;
+  const errBox = $("jsonLoginErr");
+  errBox.textContent = "";
+  if (!uid) { errBox.textContent = "请先选择要导出的账号"; return; }
+  let doc;
+  try {
+    doc = await api(`/api/account/export_json?uid=${encodeURIComponent(uid)}`);
+  } catch (e) {
+    errBox.textContent = e.message || "导出失败";
+    return;
+  }
+  $("jsonPayload").value = JSON.stringify(doc, null, 2);
+  $("jsonPayload").focus();
+  toast("已导出到输入框，可直接复制或在本机改渠道后重新添加");
+}
+
+async function submitJSONLogin() {
+  const channel = $("jsonChannel").value;
+  const text = $("jsonPayload").value.trim();
+  const errBox = $("jsonLoginErr");
+  errBox.textContent = "";
+  if (!text) { errBox.textContent = "请先粘贴凭据 JSON"; return; }
+  let r;
+  try {
+    r = await api("/api/login/json", { channel, json: text });
+  } catch (e) {
+    errBox.textContent = e.message || "添加失败";
+    return;
+  }
+  $("jsonLoginOverlay").classList.add("hidden");
+  toast(`已添加 ${chLabel(channel)} 账号 ${r.uid || ""}（${r.file || ""}）`, 6000);
+  await loadState();
 }
 
 // importLocal 从本机已登录的官方客户端导入凭据（MonkeyCode / 小浣熊 / Loomy）。
@@ -1961,6 +2048,16 @@ function bind() {
   $("btnLoginConfirm").onclick = confirmLogin;
   $("btnLoginConfirmCancel").onclick = () => $("loginConfirmOverlay").classList.add("hidden");
   $("loginConfirmOverlay").onclick = (e) => { if (e.target === $("loginConfirmOverlay")) $("loginConfirmOverlay").classList.add("hidden"); };
+
+  // JSON 登录弹层
+  $("btnAddJSON").onclick = promptJSONLogin;
+  $("btnJSONCancel").onclick = () => $("jsonLoginOverlay").classList.add("hidden");
+  $("btnJSONSubmit").onclick = submitJSONLogin;
+  $("btnJSONExport").onclick = exportJSONAccount;
+  $("jsonLoginOverlay").onclick = (e) => { if (e.target === $("jsonLoginOverlay")) $("jsonLoginOverlay").classList.add("hidden"); };
+  $("jsonPayload").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) submitJSONLogin();
+  });
 
   $("aboutOverlay").onclick = (e) => { if (e.target === $("aboutOverlay")) closeAbout(); };
 }

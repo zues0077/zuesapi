@@ -56,7 +56,7 @@ import (
 // （cmd/workbuddy-api/rsrc_windows_amd64.syso，由 build/make_syso.py 从
 // icon.ico 生成）也带版本号，须重新生成 —— 见 build/ICON_README.md。
 // 否则文件属性里显示的还是旧版本，与面板显示不一致。
-const Version = "0.1.2"
+const Version = "0.1.3"
 
 const (
 	loginTimeout   = 5 * time.Minute
@@ -366,6 +366,40 @@ func (a *App) checkinTimes() []string {
 		return rt.Scheduler.CheckinTimes()
 	}
 	return nil
+}
+
+// SwitchAccount 快速切号：把 uid 账号置顶为其渠道的优先账号（后续新请求恒走它）。
+// uid 传空 = 取消置顶，恢复自动轮换。
+//
+// 「任务不丢失」的保证：
+//   - 会话粘性不受影响 —— 已绑定的 conversationId 继续走原账号，多轮任务/工具调用
+//     的上下文与账号映射不变；
+//   - 置顶号一旦冷却/禁用/被请求级排除，自动回落原策略，服务不中断；
+//     恢复后置顶自动重新生效。
+func (a *App) SwitchAccount(uid string) (string, error) {
+	uid = strings.TrimSpace(uid)
+	if uid == "" {
+		a.mu.Lock()
+		rts := make([]*Runtime, 0, len(a.runtimes))
+		for _, rt := range a.runtimes {
+			if rt != nil && rt.Pool != nil && !rt.Alias {
+				rts = append(rts, rt)
+			}
+		}
+		a.mu.Unlock()
+		for _, rt := range rts {
+			rt.Pool.Pin("")
+		}
+		log.Printf("快速切号：已取消置顶，恢复自动轮换")
+		return "", nil
+	}
+	rt, au := a.findRuntimeAuth(uid)
+	if rt == nil || au == nil {
+		return "", fmt.Errorf("未找到 uid=%s 的账号", uid)
+	}
+	rt.Pool.Pin(uid)
+	log.Printf("快速切号：%s 置顶 uid=%s", au.Kind, uid)
+	return au.Nickname, nil
 }
 
 func (a *App) keepaliveHours() []int {
@@ -1950,6 +1984,8 @@ type AccountView struct {
 	// Growth 该账号所属渠道是否支持成长中心（决定面板是否显示「做任务」入口）。
 	// 成长中心目前仅 WorkBuddy 国内版提供。
 	Growth bool `json:"growth,omitempty"`
+	// Pinned 该账号是否被「快速切号」置顶（后续新请求优先走它）。
+	Pinned bool `json:"pinned,omitempty"`
 	// LastUsedAt 最近一次真正发起调用的时间（空 = 从未调用）。前端据此排
 	// 「最近用过」并在卡片上显示时间。
 	LastUsedAt string `json:"last_used_at,omitempty"`
@@ -2113,6 +2149,7 @@ func (a *App) accountViews() []AccountView {
 			LastCheckinAt:   fmtTime(s.LastCheckinAt),
 			LastCheckinMsg:  s.LastCheckinMsg,
 			Growth:          a.channelSupportsGrowth(provider.Kind(group)),
+			Pinned:          s.Pinned,
 			// LastUsedAt 供前端排「最近用过」与展示时间；InUse 是面板
 			// 轮询时现算的快照（InUseWindow 内被打点即视为调用中）。
 			LastUsedAt: fmtTime(s.LastUsedAt),
@@ -2296,6 +2333,33 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	})
+	// JSON 登录：用户粘贴凭据 JSON（嵌套 auths/*.json 格式或扁平格式），
+	// 解析校验后直接落盘为账号，作为 OAuth / 客户端导入之外的兜底入口。
+	mux.HandleFunc("POST /api/login/json", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Channel string `json:"channel"`
+			JSON    string `json:"json"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			apiError(w, http.StatusBadRequest, "请求体解析失败")
+			return
+		}
+		res, err := a.SubmitJSONAuth(req.Channel, req.JSON)
+		if err != nil {
+			apiError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, res)
+	})
+	// JSON 导出：把已有账号的凭据读出为可粘贴 JSON（迁移 / 备份用）。
+	mux.HandleFunc("GET /api/account/export_json", func(w http.ResponseWriter, r *http.Request) {
+		doc, err := a.ExportAccountJSON(r.URL.Query().Get("uid"))
+		if err != nil {
+			apiError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, doc)
+	})
 	mux.HandleFunc("POST /api/login/glm_token", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			RefreshToken string `json:"refresh_token"`
@@ -2310,6 +2374,19 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "uid": uid})
+	})
+	// 快速切号：置顶账号（uid 空 = 取消置顶恢复自动轮换）。
+	mux.HandleFunc("POST /api/account/switch", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UID string `json:"uid"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		nickname, err := a.SwitchAccount(req.UID)
+		if err != nil {
+			apiError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "nickname": nickname})
 	})
 	mux.HandleFunc("POST /api/account/checkin", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
