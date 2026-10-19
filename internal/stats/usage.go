@@ -52,14 +52,6 @@ type ModelStat struct {
 	AvgTTFBMs    int64   `json:"avg_ttfb_ms"`
 	AvgTokPerSec float64 `json:"avg_tok_per_sec"`
 	PerfSamples  int64   `json:"perf_samples"`
-	// Free/Rate 由 app 层用费率缓存回填（stats 不依赖定价）：Free = 显式倍率且为 0。
-	Free bool    `json:"free"`
-	Rate float64 `json:"rate"`
-	// Exhausted/ResetAt 反应式额度提示：该模型今日撞过上游限流「将在 X 重置」且重置点
-	// 仍在未来时，Exhausted=true、ResetAt 为重置时刻（本地墙钟文案，前端显示倒计时）。
-	// 上游无主动的模型级每日额度接口，故只能在实际撞墙后回填，用尽前不显示剩余额度。
-	ResetAt   string `json:"reset_at,omitempty"`
-	Exhausted bool   `json:"exhausted,omitempty"`
 }
 
 // modelEntry per-model 今日累计（消耗 + 性能采样）。
@@ -161,7 +153,7 @@ func channelOfModel(model string) (string, bool) {
 }
 
 // modelStatsLocked 生成今日按模型消耗行（调用方须持锁；积分降序）。
-func (s *Stats) modelStatsLocked(now time.Time) []ModelStat {
+func (s *Stats) modelStatsLocked() []ModelStat {
 	models := make([]ModelStat, 0, len(s.models))
 	for name, m := range s.models {
 		st := ModelStat{Model: name, Reqs: m.reqs, Tokens: m.tokens, Credit: m.credit}
@@ -171,13 +163,6 @@ func (s *Stats) modelStatsLocked(now time.Time) []ModelStat {
 		}
 		if m.genSec > 0 {
 			st.AvgTokPerSec = float64(m.genTokens) / m.genSec
-		}
-		// 反应式额度提示：命中未过期的模型级重置点则标注「今日已用尽 + 重置时刻」。
-		if s.modelReset != nil {
-			if t, ok := s.modelReset[canonicalModelKey(name)]; ok && t.After(now) {
-				st.Exhausted = true
-				st.ResetAt = t.Format("2006-01-02 15:04:05")
-			}
 		}
 		models = append(models, st)
 	}
@@ -302,4 +287,28 @@ func (s *Stats) MarkModelRateLimited(model string, resetAt time.Time, now time.T
 	}
 	s.modelReset[key] = resetAt
 	s.dirty = true
+}
+
+// ModelQuota 按 canonical 模型名（"渠道/模型"，忽略倍率后缀）返回该模型今日请求数、
+// 是否已被限流用尽、以及重置时刻。供「模型列表和费率」面板标注免费模型额度用。
+// 无该模型记录时 reqs=0、exhausted=false、resetAt 为零值。
+func (s *Stats) ModelQuota(model string) (reqs int64, exhausted bool, resetAt time.Time) {
+	key := canonicalModelKey(model)
+	if key == "" {
+		return 0, false, time.Time{}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	for name, e := range s.models {
+		if canonicalModelKey(name) == key {
+			reqs += e.reqs
+		}
+	}
+	if s.modelReset != nil {
+		if t, ok := s.modelReset[key]; ok && t.After(now) {
+			return reqs, true, t
+		}
+	}
+	return reqs, false, time.Time{}
 }

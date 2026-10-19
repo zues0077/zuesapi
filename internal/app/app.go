@@ -56,7 +56,7 @@ import (
 // （cmd/workbuddy-api/rsrc_windows_amd64.syso，由 build/make_syso.py 从
 // icon.ico 生成）也带版本号，须重新生成 —— 见 build/ICON_README.md。
 // 否则文件属性里显示的还是旧版本，与面板显示不一致。
-const Version = "0.1.4"
+const Version = "0.1.5"
 
 const (
 	loginTimeout   = 5 * time.Minute
@@ -2675,12 +2675,7 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 			writeJSON(w, http.StatusOK, map[string]any{"disabled": true})
 			return
 		}
-		snap := a.stats.Snapshot(time.Now())
-		// 用费率缓存给模型行补「免费/付费」标注（stats 引擎本身不依赖定价）。
-		for i := range snap.Models {
-			snap.Models[i].Free, snap.Models[i].Rate = a.modelFreeRate(snap.Models[i].Model)
-		}
-		writeJSON(w, http.StatusOK, snap)
+		writeJSON(w, http.StatusOK, a.stats.Snapshot(time.Now()))
 	})
 	// 请求日志（最近 N 条，默认 15；rows 形状对齐 sidecar /capi/logs）
 	mux.HandleFunc("GET /api/stats/logs", func(w http.ResponseWriter, r *http.Request) {
@@ -2775,6 +2770,13 @@ type feesModelRow struct {
 	SupportsImages    bool `json:"supports_images"`
 	SupportsReasoning bool `json:"supports_reasoning"`
 	SupportsTools     bool `json:"supports_tools"`
+	// 免费模型额度标注（仅对 Free=true 的模型填充，来自运行统计引擎）：
+	// TodayReqs=该模型今日请求数；Exhausted=今日已被上游限流用尽；ResetAt=重置时刻
+	// （"2006-01-02 15:04:05"）。上游无逐模型剩余额度接口，故 Exhausted/ResetAt 为
+	// 反应式——只有真被限流（6004）后才有值。
+	TodayReqs int64  `json:"today_reqs,omitempty"`
+	Exhausted bool   `json:"exhausted,omitempty"`
+	ResetAt   string `json:"reset_at,omitempty"`
 }
 
 // buildFeesChannels 以「渠道 models 列表」为基准组表：
@@ -2867,19 +2869,6 @@ func (a *App) ModelRate(kind provider.Kind, model string) (float64, bool) {
 	return 0, false
 }
 
-// modelFreeRate 依据费率缓存判断某模型是否免费并返回其倍率（运行统计模型表用）。
-// model 形如 "workbuddy/hy3 (0.00x)"：取渠道前缀 + 剥倍率后缀后的裸模型名查缓存。
-// 无渠道前缀 / 无定价 / 上游未返回倍率 → free=false、rate=0（绝不臆造免费或倍率）。
-func (a *App) modelFreeRate(model string) (bool, float64) {
-	i := strings.IndexByte(model, '/')
-	if i <= 0 {
-		return false, 0
-	}
-	bare, _ := provider.StripRateSuffix(model[i+1:])
-	rate, explicit := a.ModelRate(provider.Kind(model[:i]), strings.TrimSpace(bare))
-	return explicit && rate == 0, rate
-}
-
 // FeesInfo 返回「模型列表和费率」面板数据。
 // 以各渠道当前生效的模型列表为基准（与 /v1/models 同源），逐行配上费率：
 // 上游未返回倍率的模型标记 priced=false，前端显示 unknown。
@@ -2914,6 +2903,26 @@ func (a *App) FeesInfo() map[string]any {
 
 	// 展示顺序固定（见 feeChannelOrder；旧 Qoder 跳过）
 	channels := buildFeesChannels(modelsByKind, cached, feeChannelOrder)
+
+	// 给免费模型行补「今日用量 / 用尽重置时间」（反应式，来自运行统计引擎）。
+	// 仅免费模型查询，避免为每个模型都扫一遍 stats。
+	if a.stats != nil {
+		for ci := range channels {
+			ch := channels[ci]
+			for mi := range ch.Models {
+				m := &ch.Models[mi]
+				if !m.Free {
+					continue
+				}
+				reqs, exhausted, resetAt := a.stats.ModelQuota(ch.Channel + "/" + m.Model)
+				m.TodayReqs = reqs
+				m.Exhausted = exhausted
+				if exhausted {
+					m.ResetAt = resetAt.Format("2006-01-02 15:04:05")
+				}
+			}
+		}
+	}
 
 	result := map[string]any{
 		"note":       "本表以各渠道实际可用模型列表为准；倍率为空的模型表示上游未返回定价（未知）。",

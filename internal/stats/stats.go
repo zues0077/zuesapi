@@ -820,7 +820,7 @@ func (s *Stats) Snapshot(now time.Time) Snapshot {
 		}
 	}
 
-	models := s.modelStatsLocked(now)
+	models := s.modelStatsLocked()
 	platforms := s.platformRowsLocked(now)
 
 	var totalCredits int64
