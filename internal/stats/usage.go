@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"workbuddy-api/internal/provider"
 )
 
 // minGenSecForTput 计入 per-model 吞吐聚合的最小生成耗时：
@@ -50,6 +52,14 @@ type ModelStat struct {
 	AvgTTFBMs    int64   `json:"avg_ttfb_ms"`
 	AvgTokPerSec float64 `json:"avg_tok_per_sec"`
 	PerfSamples  int64   `json:"perf_samples"`
+	// Free/Rate 由 app 层用费率缓存回填（stats 不依赖定价）：Free = 显式倍率且为 0。
+	Free bool    `json:"free"`
+	Rate float64 `json:"rate"`
+	// Exhausted/ResetAt 反应式额度提示：该模型今日撞过上游限流「将在 X 重置」且重置点
+	// 仍在未来时，Exhausted=true、ResetAt 为重置时刻（本地墙钟文案，前端显示倒计时）。
+	// 上游无主动的模型级每日额度接口，故只能在实际撞墙后回填，用尽前不显示剩余额度。
+	ResetAt   string `json:"reset_at,omitempty"`
+	Exhausted bool   `json:"exhausted,omitempty"`
 }
 
 // modelEntry per-model 今日累计（消耗 + 性能采样）。
@@ -151,7 +161,7 @@ func channelOfModel(model string) (string, bool) {
 }
 
 // modelStatsLocked 生成今日按模型消耗行（调用方须持锁；积分降序）。
-func (s *Stats) modelStatsLocked() []ModelStat {
+func (s *Stats) modelStatsLocked(now time.Time) []ModelStat {
 	models := make([]ModelStat, 0, len(s.models))
 	for name, m := range s.models {
 		st := ModelStat{Model: name, Reqs: m.reqs, Tokens: m.tokens, Credit: m.credit}
@@ -161,6 +171,13 @@ func (s *Stats) modelStatsLocked() []ModelStat {
 		}
 		if m.genSec > 0 {
 			st.AvgTokPerSec = float64(m.genTokens) / m.genSec
+		}
+		// 反应式额度提示：命中未过期的模型级重置点则标注「今日已用尽 + 重置时刻」。
+		if s.modelReset != nil {
+			if t, ok := s.modelReset[canonicalModelKey(name)]; ok && t.After(now) {
+				st.Exhausted = true
+				st.ResetAt = t.Format("2006-01-02 15:04:05")
+			}
 		}
 		models = append(models, st)
 	}
@@ -254,4 +271,35 @@ func (s *Stats) reqSumLocked() int64 {
 		sum += v
 	}
 	return sum
+}
+
+// canonicalModelKey 归一模型名，用于「额度/重置」跨请求匹配：剥掉倍率后缀并去空白。
+// 客户端可能带后缀（`workbuddy/hy3 (0.00x)`）或不带（`workbuddy/hy3`），归一后同键。
+func canonicalModelKey(model string) string {
+	base, _ := provider.StripRateSuffix(model)
+	return strings.TrimSpace(base)
+}
+
+// MarkModelRateLimited 记录某模型撞上游限流后的重置时刻（反应式额度提示的数据入口）。
+// 由 /v1 转发路径在解析到响应体「将在 X 重置」时进程内直调（对齐 R13，禁 HTTP 自环）。
+// 仅当 resetAt 在未来才记录；同一模型保留更晚的重置点（上游多次报不同值时不低估）。
+func (s *Stats) MarkModelRateLimited(model string, resetAt time.Time, now time.Time) {
+	if model == "" || resetAt.IsZero() || !resetAt.After(now) {
+		return
+	}
+	key := canonicalModelKey(model)
+	if key == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rollDayLocked(now)
+	if s.modelReset == nil {
+		s.modelReset = map[string]time.Time{}
+	}
+	if cur, ok := s.modelReset[key]; ok && !resetAt.After(cur) {
+		return
+	}
+	s.modelReset[key] = resetAt
+	s.dirty = true
 }

@@ -2550,9 +2550,11 @@ function renderExpiry(ex) {
   $("stExpiry").className = "st-expiry st-block";
 }
 
-// 模型消耗（今日，按积分降序）：Trae 系积分加「≈」（分摊估算），平均速度=成功请求实测均值
+// 模型消耗（今日，按积分降序）：Trae 系积分加「≈」（分摊估算），平均速度=成功请求实测均值。
+// 新增两列：类型（免费/付费，来自费率缓存）、额度（该模型今日撞上游限流「将在 X 重置」后
+// 显示「已用尽 · HH:MM 重置」；上游无主动模型级额度接口，故用尽前显示「—」）。
 function renderModels(models) {
-  let mh = `<tr><th>#</th><th>模型</th><th>次数</th><th>Token</th><th>积分</th>` +
+  let mh = `<tr><th>#</th><th>模型</th><th>类型</th><th>次数</th><th>Token</th><th>积分</th><th>额度</th>` +
     `<th title="成功请求实测均值：tok/s = 生成 token ÷ 生成耗时（按时长加权）；TTFB = 首字节耗时算术平均">平均速度</th></tr>`;
   models.forEach((m, j) => {
     const isTrae = isTraeChannel(m.model);
@@ -2566,6 +2568,21 @@ function renderModels(models) {
         ? `<span title="TraeWork 无单次精确积分，按渠道真实消耗分摊；暂无余额差值消耗">—</span>`
         : fmtCreditS(m.credit);
     }
+    // 类型：免费（倍率 0 且上游显式返回）绿色标注；否则有倍率显示倍率，未知显示「付费」。
+    let typeCell;
+    if (m.free) {
+      typeCell = `<span class="st-free" title="免费模型（积分倍率 0.00x，不消耗积分）">免费</span>`;
+    } else if (Number(m.rate) > 0) {
+      typeCell = `<span title="积分倍率">${Number(m.rate).toFixed(2)}x</span>`;
+    } else {
+      typeCell = `<span class="st-muted">付费</span>`;
+    }
+    // 额度：撞过限流且重置点在未来 → 已用尽 + 重置时刻；否则占位。
+    let quotaCell = `<span class="st-muted">—</span>`;
+    if (m.exhausted && m.reset_at) {
+      const hhmm = String(m.reset_at).slice(11, 16);
+      quotaCell = `<span class="st-exhaust" title="该模型今日额度已用尽，到点自动恢复（无需重新登录），也可先切换其他模型">已用尽 · ${esc(hhmm)} 重置</span>`;
+    }
     const tps = Number(m.avg_tok_per_sec) || 0;
     const ttfb = Number(m.avg_ttfb_ms) || 0;
     const parts = [];
@@ -2576,10 +2593,12 @@ function renderModels(models) {
       : "—";
     mh += `<tr><td class="st-idx">${j + 1}</td>` +
       `<td class="st-mono" title="${esc(m.model)}">${esc(m.model)}</td>` +
+      `<td>${typeCell}</td>` +
       `<td>${fmtCredits(m.reqs)}</td><td>${fmtTokensFull(m.tokens)}</td><td>${creditCell}</td>` +
+      `<td>${quotaCell}</td>` +
       `<td class="st-mono">${perfCell}</td></tr>`;
   });
-  $("stModels").innerHTML = models.length ? mh : `<tr><td class="st-empty" colspan="6">今日暂无消耗</td></tr>`;
+  $("stModels").innerHTML = models.length ? mh : `<tr><td class="st-empty" colspan="8">今日暂无消耗</td></tr>`;
 }
 
 // 请求日志：降序渲染（最新在最上）；tok/s 仅流式有值，0/空给「—」

@@ -56,7 +56,7 @@ import (
 // （cmd/workbuddy-api/rsrc_windows_amd64.syso，由 build/make_syso.py 从
 // icon.ico 生成）也带版本号，须重新生成 —— 见 build/ICON_README.md。
 // 否则文件属性里显示的还是旧版本，与面板显示不一致。
-const Version = "0.1.3"
+const Version = "0.1.4"
 
 const (
 	loginTimeout   = 5 * time.Minute
@@ -2675,7 +2675,12 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 			writeJSON(w, http.StatusOK, map[string]any{"disabled": true})
 			return
 		}
-		writeJSON(w, http.StatusOK, a.stats.Snapshot(time.Now()))
+		snap := a.stats.Snapshot(time.Now())
+		// 用费率缓存给模型行补「免费/付费」标注（stats 引擎本身不依赖定价）。
+		for i := range snap.Models {
+			snap.Models[i].Free, snap.Models[i].Rate = a.modelFreeRate(snap.Models[i].Model)
+		}
+		writeJSON(w, http.StatusOK, snap)
 	})
 	// 请求日志（最近 N 条，默认 15；rows 形状对齐 sidecar /capi/logs）
 	mux.HandleFunc("GET /api/stats/logs", func(w http.ResponseWriter, r *http.Request) {
@@ -2860,6 +2865,19 @@ func (a *App) ModelRate(kind provider.Kind, model string) (float64, bool) {
 		}
 	}
 	return 0, false
+}
+
+// modelFreeRate 依据费率缓存判断某模型是否免费并返回其倍率（运行统计模型表用）。
+// model 形如 "workbuddy/hy3 (0.00x)"：取渠道前缀 + 剥倍率后缀后的裸模型名查缓存。
+// 无渠道前缀 / 无定价 / 上游未返回倍率 → free=false、rate=0（绝不臆造免费或倍率）。
+func (a *App) modelFreeRate(model string) (bool, float64) {
+	i := strings.IndexByte(model, '/')
+	if i <= 0 {
+		return false, 0
+	}
+	bare, _ := provider.StripRateSuffix(model[i+1:])
+	rate, explicit := a.ModelRate(provider.Kind(model[:i]), strings.TrimSpace(bare))
+	return explicit && rate == 0, rate
 }
 
 // FeesInfo 返回「模型列表和费率」面板数据。
