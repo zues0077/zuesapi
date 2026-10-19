@@ -737,8 +737,6 @@ rotateLoop:
 		if status >= 400 {
 			statRow.Status = status // 所有透传出口（单账号/请求级/惩罚后）共用
 			h.stickyClear(rt)
-			// 反应式额度提示：不论后续是冷却还是透传，只要响应体带「将在 X 重置」就记录。
-			h.recordModelReset(clientModel, string(respBody))
 			kind := rt.Upstream.Classify(status, string(respBody))
 			// 单账号渠道：任何账号级惩罚都等于整条渠道下线，故一律原文透传、不罚账号。
 			// 尤其在 429（唯一需要的背压）上：冷却后后续请求会在挑号阶段被挡成
@@ -849,8 +847,6 @@ rotateLoop:
 			if serr != nil {
 				// 上游中断/空流已尽力透传，错误仅在日志可见
 				log.Printf("stream relay end platform=%s uid=%s err=%v", rt.Kind, acct.UID, serr)
-				// 流内业务错误（如 6004 限流）文本里也可能带「将在 X 重置」，反应式记录额度重置点。
-				h.recordModelReset(clientModel, serr.Error())
 				// 流内业务错误（traework SOLO 的 event:error，如 3004 限流）：
 				// HTTP 200 与响应头早已发出，无法在同一请求内换号重试；唯一补救是把
 				// 中招账号冷却掉——下次请求挑号会自动换到别的账号（粘性路由见
@@ -1341,18 +1337,6 @@ func softRateResetTs(body string) (time.Time, bool) {
 		return time.Time{}, false
 	}
 	return reset, true
-}
-
-// recordModelReset 反应式捕获上游限流响应体里的「将在 X 重置」，写入运行统计，供面板
-// 显示该模型今日额度的重置倒计时。仅解析命中且重置点在未来时记录；纯旁路观测，不改
-// 变任何透传/冷却决策，也不影响主流程（h.stats 为 nil 时直接跳过）。
-func (h *Handler) recordModelReset(clientModel, body string) {
-	if h.stats == nil || body == "" {
-		return
-	}
-	if ts, ok := softRateResetTs(body); ok {
-		h.stats.MarkModelRateLimited(clientModel, ts, time.Now())
-	}
 }
 
 // truncateBody 错误日志/聚合 lastErr 用的响应体摘要。

@@ -56,7 +56,7 @@ import (
 // （cmd/workbuddy-api/rsrc_windows_amd64.syso，由 build/make_syso.py 从
 // icon.ico 生成）也带版本号，须重新生成 —— 见 build/ICON_README.md。
 // 否则文件属性里显示的还是旧版本，与面板显示不一致。
-const Version = "0.1.6"
+const Version = "0.1.7"
 
 const (
 	loginTimeout   = 5 * time.Minute
@@ -2770,13 +2770,6 @@ type feesModelRow struct {
 	SupportsImages    bool `json:"supports_images"`
 	SupportsReasoning bool `json:"supports_reasoning"`
 	SupportsTools     bool `json:"supports_tools"`
-	// 免费模型额度标注（仅对 Free=true 的模型填充，来自运行统计引擎）：
-	// TodayReqs=该模型今日请求数；Exhausted=今日已被上游限流用尽；ResetAt=重置时刻
-	// （"2006-01-02 15:04:05"）。上游无逐模型剩余额度接口，故 Exhausted/ResetAt 为
-	// 反应式——只有真被限流（6004）后才有值。
-	TodayReqs int64  `json:"today_reqs,omitempty"`
-	Exhausted bool   `json:"exhausted,omitempty"`
-	ResetAt   string `json:"reset_at,omitempty"`
 }
 
 // buildFeesChannels 以「渠道 models 列表」为基准组表：
@@ -2903,26 +2896,6 @@ func (a *App) FeesInfo() map[string]any {
 
 	// 展示顺序固定（见 feeChannelOrder；旧 Qoder 跳过）
 	channels := buildFeesChannels(modelsByKind, cached, feeChannelOrder)
-
-	// 给免费模型行补「今日用量 / 用尽重置时间」（反应式，来自运行统计引擎）。
-	// 仅免费模型查询，避免为每个模型都扫一遍 stats。
-	if a.stats != nil {
-		for ci := range channels {
-			ch := channels[ci]
-			for mi := range ch.Models {
-				m := &ch.Models[mi]
-				if !m.Free {
-					continue
-				}
-				reqs, exhausted, resetAt := a.stats.ModelQuota(ch.Channel + "/" + m.Model)
-				m.TodayReqs = reqs
-				m.Exhausted = exhausted
-				if exhausted {
-					m.ResetAt = resetAt.Format("2006-01-02 15:04:05")
-				}
-			}
-		}
-	}
 
 	result := map[string]any{
 		"note":       "本表以各渠道实际可用模型列表为准；倍率为空的模型表示上游未返回定价（未知）。",

@@ -23,14 +23,6 @@ type persistJSON struct {
 	Events      map[string]int64                   `json:"events,omitempty"`       // 今日签到事件收入 uid|day -> 数额
 	ModelDays   map[string]map[string]modelPersist `json:"model_days,omitempty"`   // 历史日 -> 模型 -> 消耗（跨天归档）
 	TodayModels *dayModelsPersist                  `json:"today_models,omitempty"` // 今日模型消耗（day 守卫，重启恢复）
-	ModelReset  *dayResetPersist                   `json:"model_reset,omitempty"`  // 今日模型级额度重置点（day 守卫，重启恢复）
-}
-
-// dayResetPersist 今日模型级额度重置时刻落盘（canonical 模型名 → RFC3339）。
-// day 守卫同 today_models：跨天/换日启动整块失效（新一天额度已重置）。
-type dayResetPersist struct {
-	Day   string            `json:"day"`
-	Reset map[string]string `json:"reset"`
 }
 
 // modelPersist 单模型消耗落盘形态（与内存 modelEntry 同口径，字段一一对应）。
@@ -145,16 +137,6 @@ func (s *Stats) load() error {
 			s.creditOutExact += mp.Credit
 		}
 	}
-	// 恢复今日模型级额度重置点（day 守卫 + 仅保留仍在未来的时刻，过期即丢）。
-	if p.ModelReset != nil && p.ModelReset.Day == s.today {
-		now := time.Now()
-		for name, rs := range p.ModelReset.Reset {
-			t, perr := time.Parse(time.RFC3339, rs)
-			if perr == nil && t.After(now) {
-				s.modelReset[name] = t
-			}
-		}
-	}
 	return nil
 }
 
@@ -170,14 +152,6 @@ func (s *Stats) flushLocked() {
 			tm[name] = fromEntry(e)
 		}
 		p.TodayModels = &dayModelsPersist{Day: s.today, Models: tm}
-	}
-	// 今日模型级额度重置点（day 守卫随存随恢复）
-	if len(s.modelReset) > 0 {
-		rm := make(map[string]string, len(s.modelReset))
-		for name, t := range s.modelReset {
-			rm[name] = t.Format(time.RFC3339)
-		}
-		p.ModelReset = &dayResetPersist{Day: s.today, Reset: rm}
 	}
 	// 历史每日模型消耗
 	if len(s.modelDays) > 0 {

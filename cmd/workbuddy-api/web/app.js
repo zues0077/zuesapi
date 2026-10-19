@@ -765,16 +765,7 @@ function renderFees(fees) {
       return `<span class="rate-unknown" title="${esc(UNKNOWN_TIP)}">unknown</span>`;
     }
     if (m.free) {
-      // 免费模型：附「今日用量」，若已被上游限流则显示「已用尽 · HH:MM 重置」。
-      // 上游不提供逐模型剩余额度，用量为本工具统计的请求数；重置时间为撞限流后反应式捕获。
-      let quota;
-      if (m.exhausted && m.reset_at) {
-        const hhmm = String(m.reset_at).slice(11, 16);
-        quota = `<span class="fee-quota-exhaust" title="该免费模型今日额度已用尽，到点自动恢复（无需重新登录），也可先切换其它模型">已用尽 · ${esc(hhmm)} 重置</span>`;
-      } else {
-        quota = `<span class="fee-quota" title="本工具统计的该免费模型今日调用次数；上游不开放剩余额度，被限流用尽后此处会显示重置时间">今日 ${fmtCredits(m.today_reqs || 0)} 次</span>`;
-      }
-      return `<span class="rate-free" title="上游标注为免费（x0.00）">✦ Free</span>${quota}`;
+      return `<span class="rate-free" title="上游标注为免费（x0.00）">✦ Free</span>`;
     }
     return `<span class="rate-paid">x${m.rate.toFixed(2)}</span>`;
   };
