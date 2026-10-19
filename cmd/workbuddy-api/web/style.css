@@ -402,6 +402,13 @@ code.about-repo:active { transform: translateY(1px); }
   border: 1px dashed var(--border); cursor: help;
 }
 .fees .rate-note { color: #d97706; font-size: 11px; }
+/* 免费模型今日额度标注：用量（灰）/ 已用尽+重置倒计时（琥珀，醒目） */
+.fees .fee-quota { display: inline-block; margin-left: 6px; font-size: 11px; color: var(--muted); }
+.fees .fee-quota-exhaust {
+  display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 999px;
+  background: #fffbeb; color: #b45309; font-weight: 600; font-size: 11px;
+  border: 1px solid #fde68a; cursor: help;
+}
 /* 能力图标：模型 ID 后的小标记，hover 显示文字说明（title） */
 .fees .cap-icons { display: inline-flex; gap: 2px; margin-left: 2px; vertical-align: middle; }
 .fees .cap-icon {

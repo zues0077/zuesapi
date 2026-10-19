@@ -689,14 +689,23 @@ func (c *Client) FetchModelPricing(a *auth.Auth) ([]provider.ModelPricing, error
 	}
 	out := make([]provider.ModelPricing, 0, len(env.Data.Models))
 	for _, m := range env.Data.Models {
+		credits := strings.TrimSpace(m.Credits)
 		rate := parseCredits(m.Credits)
-		if rate <= 0 && m.ID != "auto" {
-			continue // hunyuan-chat 等非计费模型
-		}
 		note, color := parseBadge(m.Tags)
-		// auto 调度器无 credits 字段：标记为非显式倍率，
-		// 避免费率面板把「缺失→0」误显示为 Free。
-		explicit := strings.TrimSpace(m.Credits) != ""
+		// 免费判定分两种上游形态，都要保留、标为 free：
+		//   ① credits 显式为 "x0.00"（限时免费/独家限免等真·免费模型）；
+		//   ② credits 缺失但带免费徽标（parseBadge 命中的「免费/限免」文案）。
+		// 只有「既无 credits、又无免费徽标」的才当作非计费内部模型（hunyuan-chat、
+		// 各类 *_subagent）跳过。auto 调度器无 credits 且非免费，特殊保留为「未知」。
+		// 旧实现用 `rate <= 0` 一刀切跳过，会把 ① 的免费模型误丢成「未知」，
+		// 导致费率面板无法标注免费、免费额度提示也永不触发。
+		if credits == "" && !isFreeBadge(note) && m.ID != "auto" {
+			continue
+		}
+		if isFreeBadge(note) && rate <= 0 {
+			rate = 0
+		}
+		explicit := credits != "" || isFreeBadge(note)
 		out = append(out, provider.ModelPricing{
 			Model:    m.ID,
 			Channel:  "workbuddy",
@@ -748,6 +757,18 @@ func parseBadge(tags []string) (label, color string) {
 		return strings.TrimSpace(body), ""
 	}
 	return "", ""
+}
+
+// isFreeBadge 判断上游促销徽标是否表示「无条件免费」（限时免费 / 独家限免 / 免费）。
+// 刻意排除「夜间免费」「夜间折扣」这类**时段性**促销——它们平时照常计费，不能当免费模型。
+func isFreeBadge(note string) bool {
+	if note == "" {
+		return false
+	}
+	if strings.Contains(note, "夜间") || strings.Contains(note, "折扣") {
+		return false
+	}
+	return strings.Contains(note, "免费") || strings.Contains(note, "限免")
 }
 
 func truncate(s string, n int) string {

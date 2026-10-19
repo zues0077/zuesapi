@@ -252,8 +252,11 @@ type Stats struct {
 	reqDays   map[string]int64                  // YYYY-MM-DD -> reqs（不含今日）
 	modelDays map[string]map[string]*modelEntry // 历史日 -> 模型 -> 消耗（跨天归档）
 
-	models    map[string]*modelEntry
-	milestone int
+	models map[string]*modelEntry
+	// modelReset 反应式模型级额度重置时刻（canonical 模型名 → 上游「将在 X 重置」）。
+	// 今日有效，跨天清零；落盘以便重启后仍显示未过期的重置倒计时。
+	modelReset map[string]time.Time
+	milestone  int
 
 	toasts []Toast
 	seq    int64
@@ -287,6 +290,7 @@ func New(dataDir string, logf func(format string, args ...any)) (*Stats, error) 
 		reqDays:        map[string]int64{},
 		modelDays:      map[string]map[string]*modelEntry{},
 		models:         map[string]*modelEntry{},
+		modelReset:     map[string]time.Time{},
 		ring:           make([]ReqRow, 0, ringCap),
 		logf:           logf,
 	}
@@ -327,6 +331,7 @@ func (s *Stats) rollDayLocked(now time.Time) {
 	s.expiredByGroup = map[string]int64{}
 	s.expiredTotal = 0
 	s.models = map[string]*modelEntry{}
+	s.modelReset = map[string]time.Time{} // 模型级重置点跨天作废（新一天额度重置）
 	s.milestone = 0
 	s.events = map[string]int64{} // 签到事件收入：跨天作废（重扫日志自动重建）
 	s.toasts = nil

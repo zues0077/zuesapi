@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"workbuddy-api/internal/provider"
 )
 
 // minGenSecForTput 计入 per-model 吞吐聚合的最小生成耗时：
@@ -254,4 +256,59 @@ func (s *Stats) reqSumLocked() int64 {
 		sum += v
 	}
 	return sum
+}
+
+// canonicalModelKey 归一模型名，用于「额度/重置」跨请求匹配：剥掉倍率后缀并去空白。
+// 客户端可能带后缀（`workbuddy/hy3 (0.00x)`）或不带（`workbuddy/hy3`），归一后同键。
+func canonicalModelKey(model string) string {
+	base, _ := provider.StripRateSuffix(model)
+	return strings.TrimSpace(base)
+}
+
+// MarkModelRateLimited 记录某模型撞上游限流后的重置时刻（反应式额度提示的数据入口）。
+// 由 /v1 转发路径在解析到响应体「将在 X 重置」时进程内直调（对齐 R13，禁 HTTP 自环）。
+// 仅当 resetAt 在未来才记录；同一模型保留更晚的重置点（上游多次报不同值时不低估）。
+func (s *Stats) MarkModelRateLimited(model string, resetAt time.Time, now time.Time) {
+	if model == "" || resetAt.IsZero() || !resetAt.After(now) {
+		return
+	}
+	key := canonicalModelKey(model)
+	if key == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rollDayLocked(now)
+	if s.modelReset == nil {
+		s.modelReset = map[string]time.Time{}
+	}
+	if cur, ok := s.modelReset[key]; ok && !resetAt.After(cur) {
+		return
+	}
+	s.modelReset[key] = resetAt
+	s.dirty = true
+}
+
+// ModelQuota 按 canonical 模型名（"渠道/模型"，忽略倍率后缀）返回该模型今日请求数、
+// 是否已被限流用尽、以及重置时刻。供「模型列表和费率」面板标注免费模型额度用。
+// 无该模型记录时 reqs=0、exhausted=false、resetAt 为零值。
+func (s *Stats) ModelQuota(model string) (reqs int64, exhausted bool, resetAt time.Time) {
+	key := canonicalModelKey(model)
+	if key == "" {
+		return 0, false, time.Time{}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	for name, e := range s.models {
+		if canonicalModelKey(name) == key {
+			reqs += e.reqs
+		}
+	}
+	if s.modelReset != nil {
+		if t, ok := s.modelReset[key]; ok && t.After(now) {
+			return reqs, true, t
+		}
+	}
+	return reqs, false, time.Time{}
 }
