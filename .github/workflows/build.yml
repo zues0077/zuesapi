@@ -58,7 +58,7 @@ jobs:
       # 代价是 checkout 变慢，对这个仓库规模可忽略。
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'push' && github.ref || 'main' }}
+          ref: ${{ github.ref }}
           fetch-depth: 0
       - uses: actions/setup-go@v5
         with:
@@ -179,7 +179,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'push' && github.ref || 'main' }}
+          ref: ${{ github.ref }}
       - uses: actions/setup-go@v5
         with:
           go-version: '1.25'
@@ -187,12 +187,15 @@ jobs:
       - name: Resolve version
         run: |
           set -euo pipefail
-          if [[ "${{ github.event_name }}" == "push" ]]; then
+          case "$GITHUB_REF" in
+          refs/tags/*)
             VER="${GITHUB_REF_NAME#v}"
-          else
-            # 手动触发没有 tag：从 app.go 的唯一版本来源取
+            ;;
+          *)
+            # 指向分支的 dispatch 没有tag：从 app.go 的唯一版本来源取
             VER=$(grep -oE 'const Version = "[0-9.]+"' internal/app/app.go | grep -oE '[0-9.]+')
-          fi
+            ;;
+          esac
           [[ "$VER" =~ ^[0-9]+(\.[0-9]+)+$ ]] || { echo "::error::版本号 $VER 不符合飞牛格式"; exit 1; }
           echo "VERSION=$VER" >> "$GITHUB_ENV"
           echo "fpk 版本: $VER"
@@ -272,8 +275,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # tag 触发（push v*）→ 检出该 tag 代码；手动触发 → 检出 main 分支代码
-          ref: ${{ github.event_name == 'push' && github.ref || 'main' }}
+          # push tag / dispatch 指向 tag → 构建并检出该 tag；dispatch main → main
+          ref: ${{ github.ref }}
 
       # 注意顺序：先 checkout 再 download-artifact，否则 git 检出会覆盖 artifacts/
       - uses: actions/download-artifact@v4
@@ -291,8 +294,12 @@ jobs:
           echo "=== release-assets 内容 ==="
           ls -la release-assets/
 
-          # tag 触发 → 创建新正式 release（不会碰其他分支的 release）
-          if [[ "${{ github.event_name }}" == "push" ]]; then
+          # 指向 tag 的运行（push tag 或 dispatch --ref v*）→ 创建新正式 release。
+          # 本仓库（fork）实测 push tag 事件不触发工作流（2026-11-02 两次重推验证），
+          # 正式发版走 gh workflow run build.yml --ref <tag>，所以不能按 event_name
+          # 判断，要按「GITHUB_REF 是不是 tag 引用」判断。
+          case "$GITHUB_REF" in
+          refs/tags/*)
             TAG="${GITHUB_REF#refs/tags/}"
             # release note 用仓库里的 RELEASE-<tag>.md（手写摘要），而非 --generate-notes
             # （后者只给 commit 链接列表，没有面向用户的变更摘要）；
@@ -306,9 +313,10 @@ jobs:
               gh release create "$TAG" release-assets/* --generate-notes
             fi
             exit 0
-          fi
-          # workflow_dispatch → 每次更新同一个 dev-build 专属 release
-          # 复用固定 tag，避免堆积；不会删除 master 分支的任何发布包
+            ;;
+          esac
+          # 指向分支的 dispatch → 每次更新同一个 dev-build 专属 release
+          # 复用固定 tag，避免堆积
           DEV_TAG="dev-build"
           if gh release view "$DEV_TAG" >/dev/null 2>&1; then
             gh release delete "$DEV_TAG" --yes --cleanup-tag
