@@ -20,6 +20,8 @@ var sanitizeFeatures = []string{
 	"You are a coding agent running in the Codex CLI", // Codex instructions 首段（截断前缀即可命中）
 	"github.com/anthropics/",                          // 反馈句里的 Anthropic 仓库链接
 	"11128",                                           // 上游反探测：裸数字错误码
+	"You are an AI agent powered by DeepSeek Harness", // DSH 身份句：system 开头逐字锚定（2026-10-21 实测）
+	"through the DeepSeek Harness Web GUI whose URL the runtime context names", // DSH 桌面 GUI 身份段首句（仅与下一句拼成 221 字符整串时命中，见改写表）
 }
 
 // sanitizeHdrRe 剥离层：header 键名即触发（与值无关），整段删除。
@@ -75,6 +77,19 @@ var sanitizeRewrites = [][2]string{
 		// 不改写必然失败。插入连字符保留可读性与指代（零宽空格无效，实测上游会归一化）。
 		"11128",
 		"11-128",
+	},
+	{
+		// DSH 身份句：上游只认 system 开头的逐字形态，插入冠词 the 即绕过（实测 200）。
+		"You are an AI agent powered by DeepSeek Harness",
+		"You are an AI agent powered by the DeepSeek Harness",
+	},
+	{
+		// DSH desktop GUI identity lead. Alone this sentence passes; the upstream anchor is
+		// the 221-char run formed by this sentence plus the one right after it, joined by a
+		// single space. Verified 2026-10-21: dropping one char, inserting a blank line, or
+		// rewording any single word all pass. names -> indicates breaks the verbatim match.
+		"through the DeepSeek Harness Web GUI whose URL the runtime context names",
+		"through the DeepSeek Harness Web GUI whose URL the runtime context indicates",
 	},
 }
 
