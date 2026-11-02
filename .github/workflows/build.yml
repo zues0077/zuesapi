@@ -49,16 +49,16 @@ jobs:
             suffix: ""
     runs-on: ${{ matrix.os }}
     steps:
-      # workflow_dispatch 手动触发按钮只在默认分支（master）显示，但构建目标始终是 dev；
+      # workflow_dispatch 手动触发按钮只在默认分支（main）显示，构建目标也是 main；
       # tag 触发（push v*）则构建对应 tag 的代码
       #
       # fetch-depth: 0 —— 拉全历史。用途只有一个：让下方「末尾换行检查」能用
-      # `origin/master...HEAD` 拿到真实的改动文件集。浅克隆实测下该 diff 恒为空
+      # `origin/main...HEAD` 拿到真实的改动文件集。浅克隆实测下该 diff 恒为空
       # （不创建 remote-tracking ref、HEAD~1 也不存在），会使那一步形同虚设。
       # 代价是 checkout 变慢，对这个仓库规模可忽略。
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'push' && github.ref || 'master' }}
+          ref: ${{ github.event_name == 'push' && github.ref || 'main' }}
           fetch-depth: 0
       - uses: actions/setup-go@v5
         with:
@@ -162,16 +162,118 @@ jobs:
           path: dist/WorkBuddyAPI-*-${{ matrix.goarch }}.dmg
           if-no-files-found: error
 
+  # fpk：飞牛 NAS 应用包（appname=wb2apifusion，默认端口 7865，原位升级线）。
+  # 两个架构都在 ubuntu-latest 上交叉编译：fnpack 只是打包工具，与宿主架构无关，
+  # amd64 的 fnpack 打 arm 平台包没有问题（manifest 的 ${PLATFORM} 决定平台字段）。
+  # 产物 artifact 名 fpk-x86 / fpk-arm，release job 的 find 平铺会自动收进 Release。
+  fpk:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: x86
+            goarch: amd64
+          - platform: arm
+            goarch: arm64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'push' && github.ref || 'main' }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Resolve version
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            VER="${GITHUB_REF_NAME#v}"
+          else
+            # 手动触发没有 tag：从 app.go 的唯一版本来源取
+            VER=$(grep -oE 'const Version = "[0-9.]+"' internal/app/app.go | grep -oE '[0-9.]+')
+          fi
+          [[ "$VER" =~ ^[0-9]+(\.[0-9]+)+$ ]] || { echo "::error::版本号 $VER 不符合飞牛格式"; exit 1; }
+          echo "VERSION=$VER" >> "$GITHUB_ENV"
+          echo "fpk 版本: $VER"
+
+      - name: Build linux binary
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          go build -trimpath -ldflags "-s -w" -o "dist/workbuddy-api-linux-${{ matrix.goarch }}" ./cmd/workbuddy-api
+          file "dist/workbuddy-api-linux-${{ matrix.goarch }}"
+
+      - name: Stage fpk tree
+        run: |
+          set -euo pipefail
+          APP=wb2apifusion
+          rm -rf "$APP"
+          cp -r "fpk/$APP" "$APP"
+          mkdir -p "$APP/app/bin"
+          cp "dist/workbuddy-api-linux-${{ matrix.goarch }}" "$APP/app/bin/workbuddy-api"
+          chmod 755 "$APP/app/bin/workbuddy-api"
+          cp config.example.json "$APP/app/config.example.json"
+          chmod 755 "$APP"/cmd/*
+          find "$APP" -type f | sort
+
+      - name: Fetch fnpack
+        run: |
+          set -euo pipefail
+          curl -fL --retry 3 "https://static2.fnnas.com/fnpack/fnpack-1.2.3-linux-amd64" -o fnpack \
+            || curl -fL --retry 3 "https://raw.githubusercontent.com/shuangji66/buildbot/main/fnpack/fnpack-1.2.3-linux-amd64" -o fnpack
+          chmod +x fnpack
+
+      - name: Fill manifest placeholders
+        run: |
+          set -euo pipefail
+          python3 - wb2apifusion/manifest "$VERSION" "${{ matrix.platform }}" <<'PY'
+          import json, sys
+          path, version, platform = sys.argv[1:4]
+          changelog = f"zuesapi {version}（sddvcm/workbuddy-api 多渠道 + zues0077 定制功能）"
+          with open(path, encoding="utf-8") as f:
+              text = f.read()
+          text = text.replace("${VERSION}", version)
+          text = text.replace("${PLATFORM}", platform)
+          # changelog 含中文/引号，走 JSON 字符串转义，不用 sed。
+          text = text.replace("${CHANGELOG}", json.dumps(changelog, ensure_ascii=False))
+          for left in ("${VERSION}", "${PLATFORM}", "${CHANGELOG}"):
+              assert left not in text, f"占位符 {left} 未被替换"
+          with open(path, "w", encoding="utf-8") as f:
+              f.write(text)
+          PY
+          cat wb2apifusion/manifest
+
+      - name: Build fpk
+        run: |
+          set -euo pipefail
+          ./fnpack build wb2apifusion
+          FPK=$(ls *.fpk | head -1)
+          [[ -z "$FPK" ]] && { echo "::error::fnpack 没有产出 .fpk"; exit 1; }
+          FINAL="wb2apifusion-${VERSION}-${{ matrix.platform }}.fpk"
+          mv "$FPK" "$FINAL"
+          echo "FINAL_FPK=$FINAL" >> "$GITHUB_ENV"
+          sha256sum "$FINAL"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fpk-${{ matrix.platform }}
+          path: ${{ env.FINAL_FPK }}
+          if-no-files-found: error
+
   release:
-    needs: build
+    needs: [build, fpk]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
         with:
-          # tag 触发（push v*）→ 检出该 tag 代码；手动触发 → 检出 dev 分支代码
-          ref: ${{ github.event_name == 'push' && github.ref || 'master' }}
+          # tag 触发（push v*）→ 检出该 tag 代码；手动触发 → 检出 main 分支代码
+          ref: ${{ github.event_name == 'push' && github.ref || 'main' }}
 
       # 注意顺序：先 checkout 再 download-artifact，否则 git 检出会覆盖 artifacts/
       - uses: actions/download-artifact@v4

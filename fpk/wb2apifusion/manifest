@@ -1,0 +1,16 @@
+appname=wb2apifusion
+version=${VERSION}
+display_name=wb2api 融合版
+desc="""<p>🔀多渠道聚合网关：把 WorkBuddy、Qoder、智谱、千问办公等平台的多个账号聚合成一个 OpenAI 兼容 API，面板在根路径。</p><p>⭐在 sddvcm/workbuddy-api 基础上并入 zues0077 定制功能（JSON 登录 / JSON 导出凭据 / WorkBuddy 快速切号 / 免费模型额度标注），并包含上游 v0.1.6 全部修复（图片压缩防撑爆上下文、DeepSeek Harness 拦截修复、僵尸进程修复等）。</p><p>默认面板 http://192.168.x.x:7865/，模型地址 http://127.0.0.1:7865/v1。</p><p>⚠️账号风控与可用性请自行评估。</p>"""
+platform=${PLATFORM}
+source=thirdparty
+maintainer=sddvcm
+maintainer_url=https://github.com/sddvcm/workbuddy-api
+distributor=zues0077
+distributor_url=https://github.com/zues0077/zuesapi
+ctl_stop=true
+desktop_uidir=ui
+desktop_applaunchname=wb2apifusion.Application
+checkport=false
+disable_authorization_path=true
+changelog=${CHANGELOG}
