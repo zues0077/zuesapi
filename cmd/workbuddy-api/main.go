@@ -193,6 +193,9 @@ func main() {
 	}
 	_ = os.MkdirAll(cfg.AuthDir, 0o755)
 	_ = os.MkdirAll(filepath.Dir(cfg.StateFile), 0o755)
+	// 老用户自愈：v0.1.9 及之前的 JSON 导入把 TraeWork 凭据写成了 traework-<uid>.json
+	// （照抄 Kind，而加载器只认 trae-*.json），账号静默不显示。改名回正确前缀。
+	migrateAuthFilePrefixes(cfg.AuthDir)
 
 	// 多渠道运行时：workbuddy / traework / qoder 各自独立 pool + state + scheduler。
 	stateDir := filepath.Dir(cfg.StateFile)
@@ -976,4 +979,42 @@ func migrateStateFiles(oldStateFile, stateDir string) {
 	}
 	_ = os.Rename(oldStateFile, oldStateFile+".old")
 	log.Printf("已迁移 state.json → state-workbuddy.json")
+}
+
+// authPrefixRenames 凭据文件前缀的历史自愈表：写错的前缀 → 加载器认的前缀。
+//
+// 只列真出过问题的组合，不做通用推导。TraeWork 是唯一「Kind ≠ 文件前缀」的渠道
+// （Kind = traework，落盘/加载用 trae-，见 internal/auth.LoadTraeDir 与
+// internal/login_trae.SaveAuth），旧版 JSON 导入按 Kind 命名因而写出孤儿文件。
+var authPrefixRenames = map[string]string{
+	"traework-": "trae-",
+}
+
+// migrateAuthFilePrefixes 把 auths/ 下前缀写错的凭据文件改名成加载器认识的前缀。
+//
+// 目标同名文件已存在时**不覆盖**：同 uid 两份凭据并存说明用户导入过两次，
+// 覆盖会静默丢掉一份真凭据（且 DPAPI/明文可能来自不同机器），风险远大于
+// 「账号仍不显示」。此时只告警，把处置权交回用户。
+func migrateAuthFilePrefixes(authDir string) {
+	for from, to := range authPrefixRenames {
+		matches, err := filepath.Glob(filepath.Join(authDir, from+"*.json"))
+		if err != nil || len(matches) == 0 {
+			continue
+		}
+		for _, fp := range matches {
+			base := filepath.Base(fp)
+			newFp := filepath.Join(filepath.Dir(fp), to+strings.TrimPrefix(base, from))
+			if _, err := os.Stat(newFp); err == nil {
+				log.Printf("警告：%s 与 %s 同时存在，跳过凭据改名 —— 请自行确认保留哪一份",
+					base, filepath.Base(newFp))
+				continue
+			}
+			if err := os.Rename(fp, newFp); err != nil {
+				log.Printf("凭据改名失败 %s → %s：%v", base, filepath.Base(newFp), err)
+				continue
+			}
+			log.Printf("已自愈改名：%s → %s（旧版 JSON 导入写错前缀，加载器不认该文件）",
+				base, filepath.Base(newFp))
+		}
+	}
 }

@@ -16,8 +16,8 @@
 
 ## 0.1 新增渠道的完整清单（最易漏，漏了不报错）
 
-接入一个新渠道需要改**五处**，其中第 4、5 处漏了**不会报错**，只是该渠道的
-自动签到/保活从不运行或界面无入口 —— 属于最难自查的一类缺陷：
+接入一个新渠道需要改**六处**，其中第 4、5、6 处漏了**不会报错**，只是该渠道的
+自动签到/保活从不运行、界面无入口，或凭据文件成为没人读的孤儿 —— 属于最难自查的一类缺陷：
 
 1. `internal/<channel>/` 协议封装，实现 `provider.Upstream`
 2. `internal/login_<channel>/` 凭据加载（面板登录 / 导入）
@@ -25,6 +25,14 @@
 4. `cmd/workbuddy-api/main.go` 调度器启动处补 `go <sch>.Run(sctx)`
    —— 文件里有醒目注释标注此位置
 5. 前端 `cmd/workbuddy-api/web/` 加渠道展示与操作入口
+6. `internal/app/login_json.go` 的 `authFilePrefix` —— **仅当该渠道凭据文件名前缀
+   ≠ `provider.Kind` 时**必须登记。绝大多数渠道两者同名，唯一例外是 TraeWork
+   （Kind = `traework`，但落盘与 `auth.LoadTraeDir` 的 glob 都是 `trae-`）。
+   漏登记的后果：JSON 导入写出 `traework-<uid>.json`，没有任何加载器认识它，
+   `SyncToDir` 又不删磁盘文件 —— 接口返回「导入成功」、日志照打，面板却始终
+   没有这个账号，且与平台无关（v0.1.9 实发缺陷，用户往飞牛 NAS 迁移账号时暴露）。
+   护栏：`TestSubmitJSONAuth_RoundTripsThroughLoader` 对 `jsonLoginChannel` 里
+   每个渠道断言「导入 → 该渠道自己的加载器能读回同一 uid」，漏登记即红。
 
 另有渠道前缀白名单（`internal/stats/stats.go`）需同步新增，否则统计漏该渠道。
 

@@ -96,20 +96,36 @@ func (a *App) SubmitJSONAuth(channel, jsonText string) (*JSONLoginResult, error)
 		return nil, fmt.Errorf("JSON 里缺少 uid（account.uid）：无法生成凭据文件名")
 	}
 
-	prefix := string(k)
+	prefix := authFilePrefix(k)
 	file, err := a.writeAuthFile(prefix, uid, doc)
 	if err != nil {
 		return nil, err
 	}
-	log.Printf("json 登录成功 channel=%s uid=%s file=%s", prefix, uid, filepath.Base(file))
+	log.Printf("json 登录成功 channel=%s uid=%s file=%s", k, uid, filepath.Base(file))
 	a.reloadAccounts()
 	a.afterAccountAdded(k)
 	return &JSONLoginResult{
-		Channel: prefix,
+		Channel: string(k), // 回给面板的是渠道名（Kind），不是文件名前缀
 		UID:     uid,
 		File:    filepath.Base(file),
 		Note:    "账号已通过 JSON 导入，凭据与浏览器登录落盘格式一致",
 	}, nil
+}
+
+// authFilePrefix 返回该渠道凭据文件的落盘前缀。
+//
+// 绝大多数渠道前缀恰好等于 provider.Kind，**唯一例外是 TraeWork**：Kind 是
+// "traework"，而登录编排 internal/login_trae.SaveAuth 写的是 `trae-<uid>.json`，
+// 加载器 auth.LoadTraeDir 也只扫 `trae-*.json`。照抄 Kind 会写出
+// `traework-<uid>.json` —— 没有任何加载器认识它，SyncToDir 又不删磁盘文件，
+// 现象是「接口返回导入成功、面板里却始终没有这个账号」，且与平台无关
+// （Windows 上用 JSON 导入 TraeWork 同样不显示，只有走浏览器 OAuth 才正常）。
+// 回归测试 TestSubmitJSONAuth_RoundTripsThroughLoader 逐渠道锁死这条映射。
+func authFilePrefix(k provider.Kind) string {
+	if k == provider.TraeWork {
+		return "trae"
+	}
+	return string(k)
 }
 
 // ExportAccountJSON 把已有账号导出为可粘贴的凭据 JSON（嵌套 auths 格式，token 为明文）。
@@ -164,26 +180,43 @@ func (a *App) findPoolAuth(uid string) *auth.Auth {
 }
 
 // authToExportDoc 把池内 Auth 转成嵌套导出文档（token 明文）。
+//
+// 必须覆盖 internal/auth.Auth 的**全部**凭据字段：少写一个，就等于「导出 → 换机
+// → 导入」往返后该渠道永久缺这块身份。最要命的是 TraeWork 的 machineId/deviceId
+// —— 签到与对话头都从 auth 文件读它们（internal/traework/headers.go 的
+// X-Machine-Id / x-device-id），丢了就是「无设备身份」，按 R37 的实测结论正是
+// 20401（设备数上限）与 4017（common risk control）的诱因；qoder 系的
+// machineToken/machineType 与 MonkeyCode 的三把 secret 同理。
+// 空字段不写入，保持 JSON 精简并兼容旧版导入侧。
 func authToExportDoc(au *auth.Auth) map[string]any {
-	doc := map[string]any{
-		"auth": map[string]any{
-			"accessToken":  au.AccessToken,
-			"refreshToken": au.RefreshToken,
-			"expiresAt":    au.ExpiresAt,
-			"domain":       au.Domain,
-		},
-		"account": map[string]any{
-			"uid":      au.UID,
-			"nickname": au.Nickname,
-		},
+	sec := map[string]any{
+		"accessToken":  au.AccessToken,
+		"refreshToken": au.RefreshToken,
+		"expiresAt":    au.ExpiresAt,
+		"domain":       au.Domain,
 	}
-	if au.ApiHost != "" {
-		doc["auth"].(map[string]any)["apiHost"] = au.ApiHost
+	for key, v := range map[string]string{
+		"apiHost":       au.ApiHost,
+		"machineId":     au.MachineID,
+		"deviceId":      au.DeviceID,
+		"machineToken":  au.MachineToken,
+		"machineType":   au.MachineType,
+		"signingSecret": au.SigningSecret,
+		"consoleCookie": au.ConsoleCookie,
+		"baizhiCookie":  au.BaizhiCookie,
+	} {
+		if v != "" {
+			sec[key] = v
+		}
+	}
+	acct := map[string]any{
+		"uid":      au.UID,
+		"nickname": au.Nickname,
 	}
 	if au.EnterpriseID != "" {
-		doc["account"].(map[string]any)["enterpriseId"] = au.EnterpriseID
+		acct["enterpriseId"] = au.EnterpriseID
 	}
-	return doc
+	return map[string]any{"auth": sec, "account": acct}
 }
 
 // parseAuthJSON 把粘贴的 JSON 解析成 authDoc，兼容嵌套与扁平两种格式。
