@@ -51,6 +51,11 @@ else
 fi
 grep -q '"admin_password": "firstpass"' "$D1/config.json" \
     && ok "首次启动把密码写进配置" || bad "首次启动没写密码"
+# 首次启动：监听端口取环境变量（此时文件还不存在，env 是唯一的端口来源）
+grep -q '"listen": ":7863"' "$D1/config.json" \
+    && ok "首次启动按环境变量写 listen=:7863" || bad "首次启动没按环境变量写监听端口"
+grep -q '^WILDWORK_LISTEN=:7863$' "$TMP/env.txt" \
+    && ok "首次启动把 LISTEN 传给程序" || bad "首次启动丢了 LISTEN（程序可能按默认端口起）"
 case "$(uname -s 2>/dev/null)" in
     Linux|Darwin) [ "$(stat -c '%a' "$D1/config.json" 2>/dev/null || stat -f '%Lp' "$D1/config.json")" = "600" ] \
         && ok "首次生成的文件权限是 600" || bad "首次生成的文件权限不是 600" ;;
@@ -67,10 +72,10 @@ d["admin_password"] = "panel-pass-2222"
 json.dump(d, open(p, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
 PY
 before=$(cat "$D1/config.json")
-run_ep "$D1" WILDWORK_LISTEN=":7863"   # 注意：这次**不给**密码环境变量
+run_ep "$D1" WILDWORK_LISTEN=":7999"   # 注意：这次**不给**密码环境变量，且端口与文件不同
 rc=$?
 if [ "$rc" = 0 ] && [ "$before" = "$(cat "$D1/config.json")" ]; then
-    ok "二次启动未改动 config.json（面板改的 api_key/密码保住了）"
+    ok "二次启动未改动 config.json（面板改的 api_key/密码/端口保住了）"
 else
     bad "二次启动重写了配置或被拒（rc=$rc）"; cat "$TMP/out.txt"
 fi
@@ -80,9 +85,12 @@ if grep -q '^WILDWORK_ADMIN_PASSWORD=' "$TMP/env.txt"; then
 else
     ok "已存在配置时凭据类环境变量已 unset"
 fi
-grep -q '^WILDWORK_LISTEN=' "$TMP/env.txt" \
-    && ok "LISTEN 仍由环境变量控制（容器内必须绑 0.0.0.0）" \
-    || bad "LISTEN 环境变量丢了（容器内可能绑回环导致访问不到）"
+# 端口也以文件为准：环境变量给的 :7999 不得传给程序，否则重启后又回到 compose 值
+if grep -q '^WILDWORK_LISTEN=' "$TMP/env.txt"; then
+    bad "已存在配置时仍把 WILDWORK_LISTEN 传给了程序（会盖掉文件里的监听端口）"
+else
+    ok "已存在配置时 LISTEN 已 unset（端口以 config.json 为准）"
+fi
 
 # ---------- 3. 对外监听 + 环境变量与文件都没有密码 → 必须拒绝启动 ----------
 D3="$TMP/d3"; mkdir -p "$D3"

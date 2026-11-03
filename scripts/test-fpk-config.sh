@@ -50,6 +50,34 @@ grep -q 'check_process "$pid"' "$MAIN" \
     && ok "启动后校验进程存活（不再无条件 return 0）" \
        || bad "start_process 未校验进程是否真的起来"
 
+# ---------- 0.1 端口归属：首次启动用向导端口，之后以文件为准 ----------
+# 从真实脚本里抽出被测函数（与 repair_listen_block 同样方式，防止测试与实现漂移）。
+eval "$(awk '/^listen_env_for_start\(\)/,/^}/' "$MAIN")"
+type listen_env_for_start >/dev/null 2>&1 \
+    || { echo "  ✗ 在 $MAIN 里找不到 listen_env_for_start"; exit 1; }
+eval "$(awk '/^effective_listen\(\)/,/^}/' "$MAIN")"
+type effective_listen >/dev/null 2>&1 \
+    || { echo "  ✗ 在 $MAIN 里找不到 effective_listen"; exit 1; }
+
+PORTD="$TMP/port"; mkdir -p "$PORTD"
+CFG_FILE="$PORTD/config.json"; LISTEN_PORT=7865
+rm -f "$CFG_FILE"
+[ "$(listen_env_for_start)" = ":7865" ] \
+    && ok "首次启动（无 config.json）注入向导端口 :7865" \
+    || bad "首次启动没有注入向导端口（实际：$(listen_env_for_start)）"
+printf '{ "listen": ":7865" }\n' > "$CFG_FILE"
+[ -z "$(listen_env_for_start)" ] \
+    && ok "已有 config.json 时不注入 WILDWORK_LISTEN（以文件为准）" \
+    || bad "已有 config.json 仍注入端口（会盖掉面板改过的值）：$(listen_env_for_start)"
+# 面板改过端口后，日志/失败提示要显示文件里的真实端口，而不是向导值
+[ "$(effective_listen)" = ":7865" ] \
+    && ok "effective_listen 能读字符串形态 listen" \
+    || bad "effective_listen 读字符串形态失败：$(effective_listen)"
+printf '{\n  "listen": {\n    "host": "",\n    "port": 7866\n  }\n}\n' > "$CFG_FILE"
+[ "$(effective_listen)" = ":7866" ] \
+    && ok "effective_listen 能读程序落盘的对象形态 listen" \
+    || bad "effective_listen 读对象形态失败：$(effective_listen)"
+
 # ---------- 1. 孤儿块：收尾带逗号 ----------
 cat > "$TMP/a.json" <<'EOF'
 {

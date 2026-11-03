@@ -22,8 +22,41 @@ PID_FILE="${TRIM_PKGVAR}/app.pid"
 BIN="${TRIM_APPDEST}/bin/workbuddy-api"
 
 export WILDWORK_HOME="${CFG_DIR}"
-export WILDWORK_LISTEN=":${LISTEN_PORT}"
 export WILDWORK_REGION="cn"
+
+# listen_env_for_start：本次启动是否要把向导端口注入 WILDWORK_LISTEN。
+#
+# config.json 是监听端口的唯一真源（与凭据同一套归属）：
+#   - 文件不存在（首次启动）→ 输出 ":{port}"，由 write_config 落盘；
+#   - 文件已存在 → 输出空串（**不注入**）。config.applyEnv 在解析文件之后执行，
+#     只看环境变量是否非空，一旦注入就会盖掉面板/文件里的 listen。
+# 返回空串时调用方负责 unset，避免从父进程继承到旧值。
+listen_env_for_start() {
+    if [ -f "$CFG_FILE" ]; then
+        printf ''
+    else
+        printf ':%s' "$LISTEN_PORT"
+    fi
+}
+
+# effective_listen：config.json 里实际生效的监听地址，仅供日志与失败提示使用。
+# 程序落盘是 {"host":...,"port":...} 对象，脚本首次写的是 ":7865" 字符串，两种都要认。
+effective_listen() {
+    if [ -f "$CFG_FILE" ]; then
+        s=$(sed -n 's/^[[:space:]]*"listen"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$CFG_FILE" | head -n 1)
+        if [ -n "$s" ]; then
+            printf '%s' "$s"
+            return 0
+        fi
+        p=$(sed -n '/"listen"[[:space:]]*:[[:space:]]*{/,/}/p' "$CFG_FILE" \
+            | sed -n 's/.*"port"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -n 1)
+        if [ -n "$p" ]; then
+            printf ':%s' "$p"
+            return 0
+        fi
+    fi
+    printf ':%s' "$LISTEN_PORT"
+}
 
 log_msg() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> ${LOG_FILE}
@@ -126,7 +159,7 @@ write_config() {
         ( umask 077
           cat > "$CFG_FILE" <<EOF
 {
-  "listen": "${WILDWORK_LISTEN}",
+  "listen": ":${LISTEN_PORT}",
   "api_key": "$(json_escape "$SECRET")",
   "admin_password": "$(json_escape "$SECRET")",
   "auth_dir": "${AUTH_DIR}",
@@ -136,7 +169,7 @@ write_config() {
 EOF
         )
         chmod 600 "$CFG_FILE" 2>/dev/null
-        log_msg "首次启动：生成 ${CFG_FILE}（listen=${WILDWORK_LISTEN}，权限 600）"
+        log_msg "首次启动：生成 ${CFG_FILE}（listen=:${LISTEN_PORT}，权限 600）"
         return 0
     fi
     # 已存在：一个字都不改。
@@ -148,11 +181,11 @@ EOF
     #      这就是 v0.1.10「应用中心点打开后几秒退回启用按钮、重启也救不回」的根因。
     #   ② sed 替换串里的 & 会展开成整行匹配、值含 | 会让表达式静默不生效：管理密码带
     #      这两个字符就当场把配置写坏（已实测复现 `"api_key": "a  "api_key": "old",b"`）。
-    #   ③ 更根本的是这三个值**本来就不靠文件生效**：config.applyEnv 在解析文件之后执行，
-    #      WILDWORK_LISTEN / WILDWORK_API_KEY / WILDWORK_ADMIN_PASSWORD 优先级更高。
-    #      改文件纯属多余，只留下把用户配置写坏的机会。
-    # 结论：向导值一律走环境变量，config.json 交给程序自己管。
-    log_msg "config.json 已存在，保持不动（监听/密钥以 WILDWORK_* 环境变量为准）"
+    #   ③ 归属：凭据（api_key / admin_password）本就以文件为准（脚本不再导出这两项
+    #      环境变量）；监听端口也改为只在首次启动注入，文件存在时不再导出
+    #      WILDWORK_LISTEN —— 否则 applyEnv 会盖掉面板改过的端口。
+    # 结论：config.json 是唯一真源；向导值只在文件缺失时用来生成它。
+    log_msg "config.json 已存在，保持不动（监听/密钥均以 ${CFG_FILE} 为准）"
     return 0
 }
 
@@ -164,6 +197,15 @@ start_process() {
     fi
 
     resolve_secret
+    # 端口归属：首次启动用向导 port，之后以 config.json 为准（见 listen_env_for_start）。
+    listen_env=$(listen_env_for_start)
+    if [ -n "$listen_env" ]; then
+        export WILDWORK_LISTEN="$listen_env"
+        log_msg "首次启动：使用向导端口（WILDWORK_LISTEN=${listen_env}）"
+    else
+        unset WILDWORK_LISTEN
+        log_msg "config.json 已存在：监听以文件为准（$(effective_listen)），忽略向导端口 ${LISTEN_PORT}"
+    fi
     write_config
     # 必须在拉起进程之前跑：config.json 非法会让程序启动即 fatal 退出。
     repair_listen_block
@@ -181,10 +223,10 @@ start_process() {
     # 「运行中」，故障被完全吞掉（现象就是「点打开，几秒后自己退回启用按钮」却毫无提示）。
     sleep 2
     if ! check_process "$pid"; then
-        log_msg "启动失败：进程已退出（pid=${pid}）。请看 ${LOG_FILE} 末尾的 fatal 原因 —— 常见：config.json 非法、端口 ${LISTEN_PORT} 被占用、对外监听未设管理密码"
+        log_msg "启动失败：进程已退出（pid=${pid}）。请看 ${LOG_FILE} 末尾的 fatal 原因 —— 常见：config.json 非法、端口 $(effective_listen) 被占用、对外监听未设管理密码"
         return 1
     fi
-    log_msg "进程已启动 pid=${pid} listen=${LISTEN_PORT}"
+    log_msg "进程已启动 pid=${pid} listen=$(effective_listen)（config.json 优先）"
     return 0
 }
 

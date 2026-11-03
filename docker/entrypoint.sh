@@ -2,8 +2,8 @@
 # workbuddy-api 容器入口（无头模式）。
 #
 # 职责：
-#   1. 由 WILDWORK_* 环境变量在容器内生成 config.json
-#      （配合 WILDWORK_HOME=/app，二进制把工作目录定在此处并读到这份配置）。
+#   1. 首次启动由 WILDWORK_* 环境变量生成 config.json（默认放持久卷 /data）；
+#      之后 listen 与凭据都以这份文件为准 —— 只有首次生成时才读环境变量。
 #      config.json 只存在于容器内，**永不 bind 挂载**，从根上避免
 #      「单文件挂载被 Docker 建成立目录」导致的崩溃。
 #   2. 对「对外监听 + 未设管理密码」这一**会被程序拒绝启动**的组合，
@@ -73,12 +73,14 @@ mkdir -p "$(dirname "$STATE_FILE")"
 # 为什么不再每次重写：面板保存设置会写 config.json，而 entrypoint 每次都按环境变量
 # 重新生成 → 用户在面板里改的 api_key / 管理密码在下次重启被 compose 里的值盖掉
 # （现象：改完密码当下有效，重启后旧密码又能登、新密码不行，客户端全部 401）。
-# 现在凭据以文件为准（对齐 workbuddy2api-panel 的做法：config.json 是唯一真源，
-# 环境变量只管 listen）。applyEnv 只在环境变量**非空**时才覆盖，所以 unset 即让位。
+# 现在凭据与监听都以文件为准（对齐 workbuddy2api-panel：config.json 是唯一真源，
+# 环境变量只在首次生成时使用）。applyEnv 只在环境变量**非空**时才覆盖，所以 unset 即让位。
 CFG_FILE="${HOME_DIR}/config.json"
 if [ -f "$CFG_FILE" ]; then
-    unset WILDWORK_API_KEY WILDWORK_ADMIN_PASSWORD
-    echo "[entrypoint] 沿用已存在的 ${CFG_FILE}（面板改过的 api_key/管理密码不会被环境变量覆盖）"
+    # 监听端口与凭据同一归属：文件已存在就不再注入，否则面板改过的端口在容器重启后
+    # 被 compose 里的 WILDWORK_LISTEN 盖回（现象：面板里改端口、重启又变回去）。
+    unset WILDWORK_API_KEY WILDWORK_ADMIN_PASSWORD WILDWORK_LISTEN
+    echo "[entrypoint] 沿用已存在的 ${CFG_FILE}（监听/凭据以文件为准，不再被环境变量覆盖）"
     # 对外监听必须有鉴权：环境变量没给密码时，要确认文件里已经设过，否则照旧拒绝启动。
     if [ -z "$ADMIN_PASSWORD" ] && ! grep -q '"admin_password"[ ]*:[ ]*"[^"]' "$CFG_FILE"; then
         echo "[entrypoint]   ✗ 无法启动：监听 ${LISTEN} 已对外暴露，但环境变量与 ${CFG_FILE} 里都没有管理密码。"
