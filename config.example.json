@@ -3,6 +3,7 @@
     "host": "127.0.0.1",
     "port": 7863
   },
+  "public_url": "",
   "api_key": "YOUR_API_KEY",
   "admin_password": "",
   "auth_dir": "./auths",

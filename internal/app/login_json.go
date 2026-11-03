@@ -75,33 +75,14 @@ var jsonLoginChannel = map[provider.Kind]bool{
 // uid 缺失时尽力从 JWT claims（uid/name/sub）推导；glm 渠道可仅凭
 // refreshToken 走上游验证取回 uid。返回保存后的 uid 供面板定位新账号。
 func (a *App) SubmitJSONAuth(channel, jsonText string) (*JSONLoginResult, error) {
-	k := provider.Kind(strings.TrimSpace(channel))
-	if k == provider.TraeCode {
-		k = provider.TraeWork // 共账号渠道统一落 traework 前缀
-	}
-	if !jsonLoginChannel[k] {
-		return nil, fmt.Errorf("渠道 %q 不支持 JSON 登录", channel)
-	}
-	jsonText = strings.TrimSpace(jsonText)
-	if jsonText == "" {
-		return nil, fmt.Errorf("凭据 JSON 为空")
-	}
-
-	doc, err := parseAuthJSON(k, jsonText)
+	k, err := jsonLoginKind(channel)
 	if err != nil {
 		return nil, err
 	}
-	uid := strings.TrimSpace(doc.Account.UID)
-	if uid == "" {
-		return nil, fmt.Errorf("JSON 里缺少 uid（account.uid）：无法生成凭据文件名")
-	}
-
-	prefix := authFilePrefix(k)
-	file, err := a.writeAuthFile(prefix, uid, doc)
+	uid, file, err := a.importAuthJSON(k, jsonText)
 	if err != nil {
 		return nil, err
 	}
-	log.Printf("json 登录成功 channel=%s uid=%s file=%s", k, uid, filepath.Base(file))
 	a.reloadAccounts()
 	a.afterAccountAdded(k)
 	return &JSONLoginResult{
@@ -110,6 +91,44 @@ func (a *App) SubmitJSONAuth(channel, jsonText string) (*JSONLoginResult, error)
 		File:    filepath.Base(file),
 		Note:    "账号已通过 JSON 导入，凭据与浏览器登录落盘格式一致",
 	}, nil
+}
+
+// jsonLoginKind 校验渠道白名单并归并共账号渠道（traecode → traework）。
+func jsonLoginKind(channel string) (provider.Kind, error) {
+	k := provider.Kind(strings.TrimSpace(channel))
+	if k == provider.TraeCode {
+		k = provider.TraeWork // 共账号渠道统一落 traework 前缀
+	}
+	if !jsonLoginChannel[k] {
+		return "", fmt.Errorf("渠道 %q 不支持 JSON 登录", channel)
+	}
+	return k, nil
+}
+
+// importAuthJSON 解析并落盘**一条**凭据，不做 reload、不触发签到/刷新。
+//
+// 拆出来是为了批量导入：单条路径每条都 reload 一次尚可接受，批量 20 条就变成
+// 20 次全渠道重扫 + 20 次 afterAccountAdded（会真实打上游接口）。批量在末尾
+// 统一 reload 一次、按渠道各触发一次后置动作即可。
+func (a *App) importAuthJSON(k provider.Kind, jsonText string) (uid, file string, err error) {
+	jsonText = strings.TrimSpace(jsonText)
+	if jsonText == "" {
+		return "", "", fmt.Errorf("凭据 JSON 为空")
+	}
+	doc, err := parseAuthJSON(k, jsonText)
+	if err != nil {
+		return "", "", err
+	}
+	uid = strings.TrimSpace(doc.Account.UID)
+	if uid == "" {
+		return "", "", fmt.Errorf("JSON 里缺少 uid（account.uid）：无法生成凭据文件名")
+	}
+	file, err = a.writeAuthFile(authFilePrefix(k), uid, doc)
+	if err != nil {
+		return "", "", err
+	}
+	log.Printf("json 登录成功 channel=%s uid=%s file=%s", k, uid, filepath.Base(file))
+	return uid, file, nil
 }
 
 // authFilePrefix 返回该渠道凭据文件的落盘前缀。
@@ -189,6 +208,10 @@ func (a *App) findPoolAuth(uid string) *auth.Auth {
 // machineToken/machineType 与 MonkeyCode 的三把 secret 同理。
 // 空字段不写入，保持 JSON 精简并兼容旧版导入侧。
 func authToExportDoc(au *auth.Auth) map[string]any {
+	// 池内 Auth 的 token 会被 RefreshToken 持锁改写（不变量 19/20），导出不加锁
+	// 就可能读到「新 access + 旧 refresh」的混合体，粘到另一台机器上直接不可用。
+	au.Lock()
+	defer au.Unlock()
 	sec := map[string]any{
 		"accessToken":  au.AccessToken,
 		"refreshToken": au.RefreshToken,

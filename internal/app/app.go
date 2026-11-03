@@ -56,7 +56,7 @@ import (
 // （cmd/workbuddy-api/rsrc_windows_amd64.syso，由 build/make_syso.py 从
 // icon.ico 生成）也带版本号，须重新生成 —— 见 build/ICON_README.md。
 // 否则文件属性里显示的还是旧版本，与面板显示不一致。
-const Version = "0.1.10"
+const Version = "0.1.11"
 
 const (
 	loginTimeout   = 5 * time.Minute
@@ -1760,6 +1760,37 @@ func (a *App) SetListen(host string, port int) error {
 	return nil
 }
 
+// SetPublicURL 设置「外网访问地址」：只影响面板顶栏显示与复制的 API 地址，
+// **不参与任何网络绑定**。
+//
+// 加这个字段是因为有人把反代出来的 https://域名:端口 填进了「监听」—— 监听表达的是
+// 「绑定哪张网卡」，填域名会让 bind 直接失败，现象是面板再也打不开、重启也不恢复。
+// 两者现在分开放：监听只管绑定，这里只管「别人从哪儿访问我」。
+//
+// 这里是**严格校验**入口（启动路径 config.normalize 对同一字段是「告警 + 清空」）：
+// 用户正在输入，应当场拿到原因；而服务不该为一个展示字段起不来。
+// 传空串 = 清除，回到按监听地址 + 局域网 IP 推导。
+// 返回清洗后的值，避免调用方再去无锁读 a.cfg.PublicURL（那会被 race detector 抓到，
+// 且与并发 setter 竞争）。
+func (a *App) SetPublicURL(raw string) (string, error) {
+	v, err := config.NormalizePublicURL(raw)
+	if err != nil {
+		return "", fmt.Errorf("外网访问地址无效：%w", err)
+	}
+	a.mu.Lock()
+	prev := a.cfg.PublicURL
+	a.cfg.PublicURL = v
+	saveErr := config.Save(a.cfg, a.cfgPath)
+	if saveErr != nil {
+		a.cfg.PublicURL = prev // 写盘失败就回滚内存：否则「面板说失败、实际已生效」
+		a.mu.Unlock()
+		return "", saveErr
+	}
+	a.mu.Unlock()
+	log.Printf("外网访问地址已更新为 %q（仅面板展示；API 基址=%s）", v, config.APIBaseFromPublic(v))
+	return v, nil
+}
+
 // SetAdminPassword 修改管理面板密码（空串 = 关闭面板鉴权）。
 // 当前监听为对外地址时不允许清空（见 SetListen）；改密码后所有旧会话立即失效。
 func (a *App) SetAdminPassword(pass string) error {
@@ -2031,6 +2062,13 @@ type State struct {
 	ListenPort int    `json:"listen_port"`
 	APIKey     string `json:"api_key"`
 
+	// PublicURL 用户配置的「外网访问地址」原值（展示字段，不参与监听）。
+	PublicURL string `json:"public_url,omitempty"`
+	// APIBase 面板顶栏要显示并供复制的 OpenAI 兼容基址：配了外网地址就用它（已补 /v1），
+	// 没配则留空，由前端按监听地址 + 局域网 IP 推导。
+	// 换算规则只有一份（config.APIBaseFromPublic），不在前端重写，避免两边漂移。
+	APIBase string `json:"api_base,omitempty"`
+
 	// AdminPassSet 是否已配置管理密码（不回显密码本身）；
 	// AuthEnabled = 面板鉴权已生效（密码非空）；
 	// AuthSession = 当前浏览器 cookie 对应的口令指纹（已登录时非空且等于服务端口令指纹）。
@@ -2086,6 +2124,8 @@ func (a *App) GetState() State {
 		CheckinTimes:   a.checkinTimes(),
 		KeepaliveHours: a.keepaliveHours(),
 		ListenHost:     listen.Host,
+		PublicURL:      a.cfg.PublicURL,
+		APIBase:        config.APIBaseFromPublic(a.cfg.PublicURL),
 		ListenPort:     listen.Port,
 		APIKey:         a.cfg.APIKey,
 		AdminPassSet:   authOn,
@@ -2360,6 +2400,42 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 		}
 		writeJSON(w, http.StatusOK, doc)
 	})
+	// JSON 批量导入：一次粘贴多条凭据（数组 / {"accounts":[…]} 信封 / 单条对象均可）。
+	mux.HandleFunc("POST /api/login/json_batch", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			JSON string `json:"json"`
+		}
+		// 条数上限（200）挡不住「单条超大」：json 字段本身可以是几 MB 的字符串，
+		// 而 glm 渠道无 uid 的条目每条还要同步打一次上游验证 —— 所以要限字节。
+		r.Body = http.MaxBytesReader(w, r.Body, 16<<20) // 16 MiB
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			apiError(w, http.StatusBadRequest, "请求体解析失败或超过 16MiB 上限")
+			return
+		}
+		res, err := a.SubmitJSONAuthBatch(req.JSON)
+		if res != nil {
+			// 有结构化回执就一律 200（哪怕一条都没进）：部分失败、全部失败都要让
+			// 前端拿到逐条原因。只有输入本身不可解析（res==nil）才走 400。
+			writeJSON(w, http.StatusOK, res)
+			return
+		}
+		if err != nil {
+			apiError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, res)
+	})
+	// JSON 批量导出：全部账号打包成一份可整份粘回导入的 JSON（每条带 channel）。
+	// ⚠️ 内容是明文凭据，与单条导出同样受面板会话保护；日志只记条数不记凭据。
+	mux.HandleFunc("GET /api/account/export_all_json", func(w http.ResponseWriter, r *http.Request) {
+		doc, err := a.ExportAllAccountsJSON()
+		if err != nil {
+			apiError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		w.Header().Set("Content-Disposition", `attachment; filename="workbuddy-api-accounts.json"`)
+		writeJSON(w, http.StatusOK, doc)
+	})
 	mux.HandleFunc("POST /api/login/glm_token", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			RefreshToken string `json:"refresh_token"`
@@ -2518,7 +2594,26 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	})
-	mux.HandleFunc("POST /api/config/admin_password", func(w http.ResponseWriter, r *http.Request) {
+	// 外网访问地址（反代/DDNS 暴露给客户端的那串 URL）：仅面板展示与复制用。
+	mux.HandleFunc("POST /api/config/public_url", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			URL string `json:"url"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			apiError(w, http.StatusBadRequest, "请求体解析失败")
+			return
+		}
+		v, err := a.SetPublicURL(req.URL)
+		if err != nil {
+			apiError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"public_url": v,
+			"api_base":   config.APIBaseFromPublic(v),
+		})
+	})
+mux.HandleFunc("POST /api/config/admin_password", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Password string `json:"password"`
 		}

@@ -78,12 +78,14 @@ function esc(s) {
 }
 
 let toastTimer = null;
-function toast(msg) {
+// toast 第二参是停留毫秒数（默认 3s）。安全类提示（明文凭据、部分失败）必须能
+// 留够时间读完，别再用一次性长文案配 3 秒消失。
+function toast(msg, ms) {
   const t = $("toast");
   t.textContent = msg;
   t.classList.remove("hidden");
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => t.classList.add("hidden"), 3000);
+  toastTimer = setTimeout(() => t.classList.add("hidden"), ms || 3000);
 }
 
 function shortUid(uid) {
@@ -376,15 +378,23 @@ function renderTopbar() {
   $("serverLine").textContent = state.running ? "服务运行中" : "服务未启动";
   $("aboutVer").textContent = state.version;
 
-  const wildcard = state.listen_host === "0.0.0.0" || state.listen_host === "" || state.listen_host === "::";
-  const host = wildcard ? (state.lan_ip || "127.0.0.1")
-    : (state.listen_host === "localhost" ? "127.0.0.1" : state.listen_host);
-  const apiURL = `http://${host}:${state.listen_port}/v1`;
+  // 配了「外网访问地址」就优先用它。/v1 的拼接规则只在后端一处
+  // （config.APIBaseFromPublic），前端不再自己拼一遍 —— 两处各写一份迟早会漂。
+  const pub = (state.api_base || "").trim();
+  let apiURL, tip;
+  if (pub) {
+    apiURL = pub;
+    tip = "来自「设置 → 外网访问地址」（点击复制）。程序实际绑定的是监听设置，两者互不影响。";
+  } else {
+    const wildcard = state.listen_host === "0.0.0.0" || state.listen_host === "" || state.listen_host === "::";
+    const host = wildcard ? (state.lan_ip || "127.0.0.1")
+      : (state.listen_host === "localhost" ? "127.0.0.1" : state.listen_host);
+    apiURL = `http://${host}:${state.listen_port}/v1`;
+    // 监听所有网卡时提示真实含义（避免误导为仅本机可用）
+    tip = wildcard ? `监听 0.0.0.0（所有网卡），局域网可用；点击复制` : "点击复制地址";
+  }
   $("apiAddr").querySelector(".val").textContent = apiURL;
-  // 监听所有网卡时提示真实含义（避免误导为仅本机可用）
-  $("apiAddr").title = wildcard
-    ? `监听 0.0.0.0（所有网卡），局域网可用；点击复制`
-    : "点击复制地址";
+  $("apiAddr").title = tip;
 
   const key = state.api_key;
   $("apiKeyDisplay").querySelector(".val").textContent = key === "" ? "（无鉴权）" : key;
@@ -1425,6 +1435,119 @@ async function submitJSONLogin() {
   await loadState();
 }
 
+// ---------- 批量 JSON 导入 / 导出 ----------
+//
+// 后端逐条独立处理、**只在末尾 reload 一次**，回执形如
+// {total, ok_count, ok[], failed[], reloaded}。失败项必须带**序号**展示：
+// 几十条粘贴文本里只说"有一条失败"，用户根本找不到是哪条。
+
+// batchRunId 守卫：导入要跑好几秒，期间用户可能关掉弹层又重开。不废弃在飞回调的
+// 话，上一次的结果会写进一个全新的弹层（甚至把新弹层直接 hide 掉）。
+let batchRunId = 0;
+
+function promptJSONBatch() {
+  batchRunId++;                 // 废弃任何在飞的上一轮
+  const b = $("btnJSONBatchSubmit");
+  b.disabled = false;
+  b.textContent = "导入";
+  $("jsonBatchPayload").value = "";
+  $("jsonBatchErr").textContent = "";
+  $("jsonBatchResultBox").classList.add("hidden");
+  $("jsonBatchSummary").textContent = "";
+  $("jsonBatchFailed").innerHTML = "";
+  $("jsonBatchOverlay").classList.remove("hidden");
+  $("jsonBatchPayload").focus();
+}
+
+async function submitJSONBatch() {
+  const myRun = ++batchRunId;
+  const text = $("jsonBatchPayload").value.trim();
+  const errBox = $("jsonBatchErr");
+  const box = $("jsonBatchResultBox");
+  const btn = $("btnJSONBatchSubmit");
+  errBox.textContent = "";
+  box.classList.add("hidden");
+  if (!text) { errBox.textContent = "请先粘贴凭据集合"; return; }
+
+  btn.disabled = true;
+  btn.textContent = "导入中…";
+  let r = null, boom = "";
+  try {
+    r = await api("/api/login/json_batch", { json: text });
+  } catch (e) {
+    boom = e.message || "导入失败";
+  }
+  if (myRun !== batchRunId) return; // 弹层已被重开/关闭：这一轮的结果作废
+  btn.disabled = false;
+  btn.textContent = "导入";
+
+  if (!r) { errBox.textContent = boom || "导入失败"; return; }
+  const total = r.total || 0;
+  const okCount = r.ok_count || 0;
+  const failed = r.failed || [];
+  $("jsonBatchSummary").textContent =
+    `成功 ${okCount} / ${total} 条` + (r.reloaded ? "（账号池已重载）" : "（未写入）");
+  $("jsonBatchFailed").innerHTML = failed.map((f) => {
+    const no = typeof f.index === "number" ? f.index + 1 : "?";
+    return `第 ${no} 条 ${esc(f.channel || "?")}：${esc(f.error || "")}`;
+  }).join("<br>");
+  box.classList.remove("hidden");
+
+  if (okCount > 0) {
+    await loadState();
+    // 有失败就留在弹层里让用户看完原因，全成才自动关。
+    if (!failed.length) {
+      $("jsonBatchOverlay").classList.add("hidden");
+      toast(`批量导入完成：${okCount} 个账号`, 6000);
+    } else {
+      toast(`导入 ${okCount} 个，另有 ${failed.length} 条失败（见下方）`, 8000);
+    }
+  } else {
+    errBox.textContent = "没有一条导入成功，见下方逐条原因";
+  }
+}
+
+// exportAllAccounts 把全部账号下载成一个 JSON 文件，可整份粘回批量导入。
+// ⚠️ 文件里是明文凭据（等同所有账号的钥匙），提示语要带上，别让人随手发到群里。
+// savePublicURL 保存「外网访问地址」。空串 = 清除，顶栏退回按监听地址推导。
+async function savePublicURL() {
+  const btn = $("btnSavePublicURL");
+  btn.disabled = true;
+  try {
+    const r = await api("/api/config/public_url", { url: $("inPublicURL").value.trim() });
+    $("inPublicURL").value = r.public_url || "";
+    toast(r.public_url ? `已设置外网访问地址，API 地址显示为 ${r.api_base}` : "已清除，API 地址退回按监听推导", 7000);
+    await loadState();
+  } catch (e) {
+    toast(e.message || "保存失败");
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function exportAllAccounts() {
+  const btn = $("btnExportAll");
+  btn.disabled = true;
+  try {
+    const doc = await api("/api/account/export_all_json");
+    const list = doc.accounts || [];
+    if (!list.length) { toast("本机还没有账号可导出"); return; }
+    const blob = new Blob([JSON.stringify(doc, null, 2)], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "workbuddy-api-accounts-v" + (doc.version || "x") + ".json";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+    toast(`已导出 ${list.length} 个账号 —— 文件内是明文凭据，请妥善保管`, 8000);
+  } catch (e) {
+    toast(e.message || "导出失败");
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 // importLocal 从本机已登录的官方客户端导入凭据（MonkeyCode / 小浣熊 / Loomy）。
 // note 只在有降级时非空（如某个凭据文件没读到）—— 必须显示出来，
 // 否则用户只看到"已导入成功"，等积分不显示时才发现。
@@ -1662,6 +1785,8 @@ function openSettings() {
   } else {
     $("customHostRow").classList.add("hidden");
   }
+  // 外网访问地址（仅展示用，不参与绑定）
+  $("inPublicURL").value = state.public_url || "";
   // API-Key
   $("keyInput").value = state.api_key;
   // 管理密码：后端不回显，只提示是否已设置（留空 = 不改动）
@@ -1752,6 +1877,15 @@ async function saveSettings() {
       const r = await api("/api/auth/login", { password: adminPass });
       authSession = r.session || "";
     } catch (e) { toast(e.message); closeSettings(); showLogin("管理密码已变更，请重新登录"); return; }
+  }
+
+  // 1.5) 外网访问地址：只在真的改动时提交。它不参与监听绑定，仅决定顶栏显示/复制的
+  // API 地址；放在密码重登之后，保证这一步带着有效会话。
+  const pub = $("inPublicURL").value.trim();
+  if (pub !== (state.public_url || "")) {
+    try {
+      await api("/api/config/public_url", { url: pub });
+    } catch (e) { toast(e.message, 7000); return; }
   }
 
   // 2) 代理（先本地校验，失败阻断保存）
@@ -2063,6 +2197,15 @@ function bind() {
   $("btnJSONCancel").onclick = () => $("jsonLoginOverlay").classList.add("hidden");
   $("btnJSONSubmit").onclick = submitJSONLogin;
   $("btnJSONExport").onclick = exportJSONAccount;
+  $("btnAddBatchJSON").onclick = promptJSONBatch;
+  $("btnJSONBatchCancel").onclick = () => $("jsonBatchOverlay").classList.add("hidden");
+  $("btnJSONBatchSubmit").onclick = submitJSONBatch;
+  $("btnExportAll").onclick = exportAllAccounts;
+  $("btnSavePublicURL").onclick = savePublicURL;
+  // 点遮罩空白处关闭：与其它弹层一致。批量导入是长耗时操作，关不掉会被误判成卡死。
+  $("jsonBatchOverlay").addEventListener("click", (e) => {
+    if (e.target === $("jsonBatchOverlay")) $("jsonBatchOverlay").classList.add("hidden");
+  });
   $("jsonLoginOverlay").onclick = (e) => { if (e.target === $("jsonLoginOverlay")) $("jsonLoginOverlay").classList.add("hidden"); };
   $("jsonPayload").addEventListener("keydown", (e) => {
     if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) submitJSONLogin();

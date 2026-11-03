@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"net"
 	"net/url"
 	"os"
@@ -107,7 +108,18 @@ func ParseListen(s string) (Listen, error) {
 
 // Config 顶层配置。
 type Config struct {
-	Listen    Listen `json:"listen"`
+	Listen Listen `json:"listen"`
+	// PublicURL 是「外网 / 反代访问地址」，**只用于面板展示与复制，绝不参与 net.Listen**。
+	//
+	// 为什么单独立一个字段：监听表达的是「绑定哪张网卡」（NAS / 容器里通常填
+	// 0.0.0.0），而经 Lucky / nginx 反代或 DDNS 暴露出去的那串 https://host:port
+	// 表达的是「客户端从哪儿访问」。两者语义不同，把外网域名填进监听会让 bind
+	// 直接失败，现象是面板再也打不开、重启也不恢复。
+	//
+	// 留空 = 沿用旧行为（面板按监听地址 + 局域网 IP 推导 API 地址）。
+	// 合法值形如 https://nas.example.com:8443；已带 /v1 也接受，展示时不重复追加。
+	PublicURL string `json:"public_url,omitempty"`
+
 	APIKey    string `json:"api_key"`        // 空 = 不鉴权
 	AdminPass string `json:"admin_password"` // 空 = 管理面板不鉴权（仅允许监听环回地址时为空）
 	AuthDir   string `json:"auth_dir"`       // ./auths
@@ -470,8 +482,62 @@ func applyEnv(c *Config) {
 	}
 }
 
+// NormalizePublicURL 清洗并校验「外网访问地址」，返回去掉首尾空白与末尾 / 的结果。
+// 空串合法（表示未配置，面板回退到按监听地址推导）。
+//
+// 校验故意只做「能不能当 URL 用」这一层：它是展示字段，填错的代价是复制到一个
+// 打不开的地址，不该因此影响服务。严格校验放在面板输入口（SetPublicURL），
+// 启动路径（normalize）只告警并清空 —— 见那里的注释。
+func NormalizePublicURL(s string) (string, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", nil
+	}
+	u, err := url.Parse(s)
+	if err != nil {
+		return "", fmt.Errorf("无法解析：%w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return "", fmt.Errorf("需以 http:// 或 https:// 开头，实得 %q", s)
+	}
+	if u.Host == "" {
+		return "", fmt.Errorf("缺少主机名：%q", s)
+	}
+	// 拒绝 https://user:pass@host —— 这个字段会被原样写进 app.log 和面板，
+	// 带 userinfo 等于把凭据塞进日志（不变量 2：日志零凭据）。
+	if u.User != nil {
+		return "", fmt.Errorf("地址里不要带用户名/密码（https://user:pass@host 形式被拒绝）：%q", s)
+	}
+	if u.RawQuery != "" || u.Fragment != "" {
+		return "", fmt.Errorf("不要带查询参数或锚点：%q", s)
+	}
+	return strings.TrimRight(s, "/"), nil
+}
+
+// APIBaseFromPublic 由外网访问地址算出给客户端的 OpenAI 兼容基址。
+// 已经以 /v1 结尾就原样用，否则补一个 /v1（用户常只填到域名+端口）。
+func APIBaseFromPublic(pub string) string {
+	pub = strings.TrimRight(strings.TrimSpace(pub), "/")
+	if pub == "" {
+		return ""
+	}
+	if strings.HasSuffix(pub, "/v1") {
+		return pub
+	}
+	return pub + "/v1"
+}
+
 func (c *Config) normalize() error {
 	var err error
+	// public_url 是纯展示字段：填错只该让「复制到的地址不对」，不该让整个服务起不来。
+	// 所以这里**不返回 error**，只告警并清空（面板会退回按监听地址推导）。
+	// 真正的严格校验在面板写入口 SetPublicURL，那里能当场把原因告诉用户。
+	if pu, perr := NormalizePublicURL(c.PublicURL); perr != nil {
+		log.Printf("public_url %q 不合法（%v），已忽略并回退为按监听地址推导 API 地址", c.PublicURL, perr)
+		c.PublicURL = ""
+	} else {
+		c.PublicURL = pu
+	}
 	if c.HardCreditDur, err = time.ParseDuration(c.Cooldown.HardCredit); err != nil {
 		return fmt.Errorf("cooldown.hard_credit: %w", err)
 	}

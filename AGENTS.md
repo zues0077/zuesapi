@@ -277,6 +277,27 @@ POST /api/quit                     # 退出程序
     - 启动时 `Pool.ClearPenalty(uid)` 自愈遗留冷却（`SetDisabled` 只清禁用，不清冷却）。
     - **严禁**把 401/403 归为 `ErrSessionDead`（会 `pool.Disable` 永久禁用且无法人工恢复）。
     - 该渠道的 `Classify` 仍做语义分类（供日志），但**不再用于决定惩罚**（惩罚判定前已短路）。
+24. **打包脚本绝不按行改 config.json**（2026-11-03 新增，v0.1.10 实发事故）
+    - 现象：飞牛应用中心点「打开」几秒后自己退回「启用」，重启也救不回。
+    - 根因：`fpk/wb2apifusion/cmd/main` 用 `sed -i "s|^  \"listen\": .*|...|"` 回写向导值，
+      而程序用 `MarshalIndent` 整体重写 config.json，`Listen` 是 `{host,port}` 结构体
+      （无自定义 MarshalJSON）落盘就是**多行对象** → 只替换首行会留下 host/port/}, 孤儿行
+      → JSON 非法 → `config.LoadOrCreate` 返回错误 → `main.go` fatal 退出。
+      且 sed 替换串里的 `&` 会展开成整行匹配、值含 `|` 会静默不生效（密码带这俩字符
+      当场写坏配置，均已实测）。
+    - 决议：**彻底删掉按行回写**。向导值一律走 `WILDWORK_*` 环境变量（`applyEnv` 在解析
+      文件之后执行，环境变量优先级本来就更高，改文件纯属多余）；脚本只负责「不存在时创建」，
+      创建时 `umask 077` + `chmod 600`（文件含 api_key 与管理面板密码）。
+    - 自愈：`repair_listen_block` 用两遍状态机清理历史孤儿行，**只认标量 listen + 前瞻确认
+      孤儿行 + 必须找到配对收尾才动手**，并顺手去掉因此悬空的尾逗号；健康文件逐字节不变、
+      幂等；动手前 `cp -p` 备份、保持 0600。
+    - 护栏：`scripts/test-fpk-config.sh`（从真实脚本里抽函数测，并断言脚本中不再出现
+      `patch_top_level` / 对 CFG_FILE 的 `sed -i`）；`internal/config/public_url_test.go`
+      里 `TestSaveWritesListenAsMultilineObject` 钉住「listen 落盘是多行对象」这一跨语言事实。
+    - 同类教训（R34/R41 同族）：**start_process 以前无论成败都 return 0**，进程秒退时
+      应用中心照样显示「运行中」，故障被完全吞掉。现在启动后校验 PID 并把 stderr 落进
+      info.log。
+
 23. **Qoder 双区签到只能走 campaigns，且状态必须结构化上报**：
     - **绝不调用 legacy `daily-check-in/claim`**：该端点已全局 DISABLED，却对未领取日恒返回 409，
       会被误判成「今日已领取」而跳过真实领取 → 假成功、零积分（上游 `99ab022` 同款结论，2026-09-21 抓包实测）。

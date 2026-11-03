@@ -73,6 +73,10 @@
           <button class="btn primary alt glm" id="btnAddGLM" style="grid-column:5;grid-row:2" title="体验渠道：仅文本对话，不支持工具调用/多模态">＋ 智谱清言</button>
           <button class="btn primary alt" id="btnAddJSON" style="grid-column:1;grid-row:3"
             title="粘贴凭据 JSON 直接添加账号（全渠道兜底，支持嵌套 auths 格式与扁平格式）">⌨ JSON 登录</button>
+          <button class="btn primary alt" id="btnAddBatchJSON" style="grid-column:2;grid-row:3"
+            title="一次粘贴多条凭据（可直接粘「导出全部账号」的文件），逐条回执、只重载一次">⇪ 批量 JSON 导入</button>
+          <button class="btn small" id="btnExportAll" style="grid-column:3;grid-row:3"
+            title="把全部账号导出成一个 JSON 文件，可整份粘回批量导入">⇩ 导出全部账号</button>
         </div>
       </div>
     </div>
@@ -269,6 +273,30 @@
   </div>
 </div>
 
+<!-- 批量 JSON 导入弹层：一次粘贴多条凭据，逐条回执 -->
+<div class="overlay hidden" id="jsonBatchOverlay">
+  <div class="modal modal-wide">
+    <div class="modal-title">批量 JSON 导入</div>
+    <div class="modal-body settings-body">
+      <div class="row" style="align-items:flex-start">
+        <label class="lbl wide">凭据集合</label>
+        <textarea id="jsonBatchPayload" class="input grow" rows="12" spellcheck="false"
+          placeholder='三种写法都支持：&#10;① 直接粘「导出全部账号」拿到的文件&#10;{"version":"…","accounts":[{"channel":"traework","auth":{…},"account":{…}}]}&#10;② 裸数组&#10;[{"channel":"workbuddy","auth":{…},"account":{…}}]&#10;③ 凭据放 json 字段（字符串）&#10;[{"channel":"glm","json":"{\"refreshToken\":\"…\",\"uid\":\"…\"}"}]&#10;&#10;每条必须带 channel（workbuddy / workbuddyai / traework / qodercn / qodercom / qwenwork / monkeycode / raccoon / loomy / glm）；单次最多 200 条。'></textarea>
+      </div>
+      <div class="hint">逐条独立处理：某条失败不影响其余；全部写完后<b>只重载一次</b>账号池。落盘格式、前缀与加密策略与单条 JSON 登录完全一致。</div>
+      <div class="hint" id="jsonBatchErr" style="color:var(--danger)"></div>
+      <div class="cfg-section hidden" id="jsonBatchResultBox">
+        <div class="cfg-heading" id="jsonBatchSummary"></div>
+        <div class="hint" id="jsonBatchFailed"></div>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn small" id="btnJSONBatchCancel">关闭</button>
+      <button class="btn small primary" id="btnJSONBatchSubmit">导入</button>
+    </div>
+  </div>
+</div>
+
 <!-- JSON 登录弹层：粘贴凭据 JSON 直接添加账号（全渠道兜底） -->
 <div class="overlay hidden" id="jsonLoginOverlay">
   <div class="modal modal-wide">
@@ -333,6 +361,13 @@
           <input id="inPort" class="input port" type="number" min="1" max="65535">
         </div>
         <div id="customHostRow" class="row hidden"><input id="inHost" class="input grow" placeholder="如 192.168.1.100" spellcheck="false"></div>
+        <div class="row">
+          <label class="lbl wide" title="只影响顶栏显示与复制的 API 地址，不参与程序绑定">外网访问地址</label>
+          <input id="inPublicURL" class="input grow" spellcheck="false" autocomplete="off"
+            placeholder="如 https://nas.example.com:8443 —— 反代/DDNS 给客户端用的地址；留空 = 按监听地址推导">
+          <button class="btn small" id="btnSavePublicURL">保存</button>
+        </div>
+        <div class="hint">「监听」= 程序<b>绑定哪张网卡</b>（NAS / 容器里应填 0.0.0.0，填域名会绑定失败）；「外网访问地址」= 客户端<b>从哪儿访问你</b>（经 Lucky / nginx 反代出来的域名端口）。两者语义不同，把外网地址填进监听会让面板彻底打不开。</div>
         <div class="row">
           <label class="lbl wide">API-Key</label>
           <input id="keyInput" class="input grow" spellcheck="false" placeholder="留空 = 不鉴权">

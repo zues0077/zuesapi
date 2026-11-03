@@ -14,11 +14,17 @@ import (
 // 保留 token_days/req_days 历史；flush 一次后即转为新格式。
 func TestLoadLegacyStatsJSON(t *testing.T) {
 	dir := t.TempDir()
-	legacy := `{
-  "token_days": {"2026-09-20": 12345},
-  "req_days": {"2026-09-20": 7},
-  "accts": {"370999939580348": "2026-09-21T22:06:12+08:00"}
-}`
+	// 日期必须**相对当天**生成。原先硬编码 2026-09-20，随着日历推移总会掉出
+	// 30 天窗口，于是 Days30 归零、测试变红 —— 而数据其实完好（days=1 就是证据）。
+	// 同包 TestTokenUsageWindows 明确锁着「40 天前的量只进 all、不进 days30」，
+	// 所以写死日期不只是脆，是与设计自相矛盾。
+	day := time.Now().AddDate(0, 0, -3).Format("2006-01-02")
+	stamp := time.Now().AddDate(0, 0, -2).Format(time.RFC3339)
+	legacy := fmt.Sprintf(`{
+  "token_days": {%q: 12345},
+  "req_days": {%q: 7},
+  "accts": {"370999939580348": %q}
+}`, day, day, stamp)
 	if err := os.WriteFile(filepath.Join(dir, "stats.json"), []byte(legacy), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -39,7 +45,7 @@ func TestLoadLegacyStatsJSON(t *testing.T) {
 	s.flushLocked()
 	s.mu.Unlock()
 	raw, _ := os.ReadFile(filepath.Join(dir, "stats.json"))
-	if bytes.Contains(raw, []byte(`"2026-09-21T22:06:12`)) {
+	if bytes.Contains(raw, []byte(stamp)) {
 		t.Fatalf("落盘后不应残留旧字符串格式: %s", raw)
 	}
 }
@@ -50,11 +56,12 @@ func TestLoadBOMTolerance(t *testing.T) {
 	dir := t.TempDir()
 	today := time.Now().Format("2006-01-02")
 	now := time.Now().Format(time.RFC3339)
+	recent := time.Now().AddDate(0, 0, -3).Format("2006-01-02")
 	body := fmt.Sprintf(`{
-  "token_days": {"2026-09-20": 100},
+  "token_days": {%q: 100},
   "req_days": {},
   "accts": {"a1": {"day": %q, "burn_since": %q, "credit_out": 42}}
-}`, today, now)
+}`, recent, today, now) // recent 相对当天，理由同 TestLoadLegacyStatsJSON
 	raw := append([]byte("\xef\xbb\xbf"), []byte(body)...)
 	if err := os.WriteFile(filepath.Join(dir, "stats.json"), raw, 0o644); err != nil {
 		t.Fatal(err)

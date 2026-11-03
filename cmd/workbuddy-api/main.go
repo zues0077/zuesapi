@@ -349,21 +349,32 @@ func main() {
 	// （且 SetTransportProxy 会新建 Transport，只套一个会导致另一个漏掉代理）。
 	trUp.StreamHTTP.Transport = trUp.HTTP.Transport
 	glmUp.StreamHTTP.Transport = glmUp.HTTP.Transport
-	applyProxies(cfg, map[string][]*http.Client{
-		provider.WorkBuddy.String():   {wbUp.HTTP, wbUp.BillingHTTP, wbUp.StreamHTTP},
-		provider.WorkBuddyAI.String(): {wbaUp.HTTP, wbaUp.StreamHTTP},
-		provider.TraeWork.String():    {trUp.HTTP, trUp.StreamHTTP},
-		provider.Qoder.String():       {qdUp.HTTP, qdUp.StreamHTTP},
-		provider.QoderCN.String():     {qcnUp.HTTP, qcnUp.StreamHTTP},
-		provider.QoderCOM.String():    {qcmUp.HTTP, qcmUp.StreamHTTP},
-		provider.QwenWork.String():    {qwUp.HTTP, qwUp.StreamHTTP},
-		provider.MonkeyCode.String():  {mcUp.HTTP, mcUp.StreamHTTP},
-		provider.Raccoon.String():     {rcUp.HTTP, rcUp.StreamHTTP},
-		provider.Loomy.String():       {lmUp.HTTP, lmUp.StreamHTTP},
-		// glm 两个 client 都要传（SetTransportProxy 会**新建** Transport，
-		// 只套 HTTP 会让 StreamHTTP 仍走直连（代理对流式不生效）。
-		provider.GLM.String(): {glmUp.HTTP, glmUp.StreamHTTP},
-	})
+	// proxyClientMap 集中定义「每个渠道需要套代理的 HTTP client」，启动与面板热更新
+	// **共用这一份**。
+	//
+	// 为什么不能两处各写一遍：SetTransportProxy 会**新建** Transport，少列一项就是
+	// 那条 client 永远走直连 —— 历史上热更新路径就漏过 monkeycode / raccoon / loomy
+	// 三项（启动有、热更新没有），后果是「面板改了这三个渠道的代理毫无反应」，
+	// 而且**删掉代理后旧的 Transport 永久残留**（applyProxies 对未配置渠道也要套直连，
+	// 漏列就连直连都清不掉）。静态回归见 proxy_client_map_test.go。
+	proxyClientMap := func() map[string][]*http.Client {
+		return map[string][]*http.Client{
+			provider.WorkBuddy.String():   {wbUp.HTTP, wbUp.BillingHTTP, wbUp.StreamHTTP},
+			provider.WorkBuddyAI.String(): {wbaUp.HTTP, wbaUp.StreamHTTP},
+			provider.TraeWork.String():    {trUp.HTTP, trUp.StreamHTTP},
+			provider.Qoder.String():       {qdUp.HTTP, qdUp.StreamHTTP},
+			provider.QoderCN.String():     {qcnUp.HTTP, qcnUp.StreamHTTP},
+			provider.QoderCOM.String():    {qcmUp.HTTP, qcmUp.StreamHTTP},
+			provider.QwenWork.String():    {qwUp.HTTP, qwUp.StreamHTTP},
+			provider.MonkeyCode.String():  {mcUp.HTTP, mcUp.StreamHTTP},
+			provider.Raccoon.String():     {rcUp.HTTP, rcUp.StreamHTTP},
+			provider.Loomy.String():       {lmUp.HTTP, lmUp.StreamHTTP},
+			// glm 两个 client 都要传（SetTransportProxy 会**新建** Transport，
+			// 只套 HTTP 会让 StreamHTTP 仍走直连（代理对流式不生效）。
+			provider.GLM.String(): {glmUp.HTTP, glmUp.StreamHTTP},
+		}
+	}
+	applyProxies(cfg, proxyClientMap())
 	checkinMinutes, err := config.ParseClockTimes(cfg.Schedule.CheckinTimes)
 	if err != nil {
 		fatal("解析签到时间失败：%v", err)
@@ -568,21 +579,12 @@ func main() {
 	appInst.SetCompatSyncer(func(defaultChannel string, maxTokensCap int, modelMap map[string]string) {
 		compat.SetCompat(defaultChannel, maxTokensCap, modelMap, channels)
 	})
-	// 面板保存代理配置时热更新各渠道 HTTP client（重建 Transport，无需重启）
+	// 面板保存代理配置时热更新各渠道 HTTP client（重建 Transport，无需重启）。
+	// 表必须与启动路径同源 —— 见 proxyClientMap 的注释。
 	appInst.SetProxySyncer(func(proxies map[string]string) {
 		next := *cfg
 		next.Proxies = proxies
-		applyProxies(&next, map[string][]*http.Client{
-			provider.WorkBuddy.String():   {wbUp.HTTP, wbUp.BillingHTTP, wbUp.StreamHTTP},
-			provider.WorkBuddyAI.String(): {wbaUp.HTTP, wbaUp.StreamHTTP},
-			provider.TraeWork.String():    {trUp.HTTP, trUp.StreamHTTP},
-			provider.Qoder.String():       {qdUp.HTTP, qdUp.StreamHTTP},
-			provider.QoderCN.String():     {qcnUp.HTTP, qcnUp.StreamHTTP},
-			provider.QoderCOM.String():    {qcmUp.HTTP, qcmUp.StreamHTTP},
-			provider.QwenWork.String():    {qwUp.HTTP, qwUp.StreamHTTP},
-			// glm 两个 client 都要传（同启动路径的理由：SetTransportProxy 新建 Transport）
-			provider.GLM.String(): {glmUp.HTTP, glmUp.StreamHTTP},
-		})
+		applyProxies(&next, proxyClientMap())
 	})
 	compat.SetAPIKeySource(inner.CurrentAPIKey) // 面板改 API-Key 后，兼容层立即跟随
 	mux := http.NewServeMux()

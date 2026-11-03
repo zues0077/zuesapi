@@ -54,24 +54,77 @@ resolve_secret() {
     return 0
 }
 
-# patch_top_level <key> <value>：只改缩进两格的那一行 —— 程序的 config.json
-# 由 MarshalIndent 写出（顶层字段恰好两格缩进），嵌套的同名字段（渠道里的
-# api_key）不能被动。找不到就在起始花括号后补一行。
-patch_top_level() {
-    key="$1"
-    value="$2"
-    line="  \"${key}\": \"${value}\","
-    if grep -q "^  \"${key}\":" "$CFG_FILE"; then
-        sed -i "s|^  \"${key}\": .*|${line}|" "$CFG_FILE"
+# repair_listen_block 自愈旧版脚本写坏的 config.json。
+#
+# 来历见 write_config 注释：旧版按行 sed 回写 listen，而程序把 listen 落盘成多行对象，
+# 于是留下孤儿行 → JSON 非法 → 程序启动即 fatal（v0.1.10 实发）。
+#
+# 判定刻意保守，避免把健康文件改坏：
+#   1. 只认**标量** listen（值在同一行闭合）。对象形态的 `  "listen": {` 绝不匹配 ——
+#      否则会连正常的对象配置一起删掉。
+#   2. 还要**前瞻**下一行确实是 4 空格缩进的孤儿行，才进入删除态。
+#   3. 必须找到与之配对的收尾 `  }` / `  },` 才真的删；找不到就一个字不动
+#      （收尾有没有逗号都要能吃掉 —— 旧实现写死「三行 + `},`」，遇到无逗号收尾就修不好）。
+#   4. 只在「确实删掉了行」时才替换原文件，并先 cp -p 备份、保持 0600
+#      （文件里有 api_key 与管理面板密码，绝不能放宽成 0644 让同机任意用户可读）。
+repair_listen_block() {
+    [ -f "$CFG_FILE" ] || return 0
+    # 先做低成本探测：标量 listen + 紧跟 4 空格行 = 损坏特征。不匹配就完全不碰文件。
+    grep -q '^  "listen": "' "$CFG_FILE" 2>/dev/null || return 0
+    grep -A1 '^  "listen": "' "$CFG_FILE" 2>/dev/null | grep -q '^    ' || return 0
+
+    tmp="${CFG_FILE}.repair"
+    # umask 077 让 awk 新建的临时文件天然是 0600；即使后续失败残留也不会泄露凭据。
+    (
+      umask 077
+      awk '
+        { a[NR] = $0; sub(/\r$/, "", a[NR]) }
+        END {
+            # 第一遍：标记要丢掉的孤儿行（含与之配对的收尾 } / },）
+            for (i = 1; i <= NR; i++) {
+                if (a[i] ~ /^  "listen": "[^"]*"[ ]*,?[ ]*$/ && a[i+1] ~ /^    /) {
+                    j = i + 1
+                    while (j <= NR && a[j] ~ /^    /) { j++ }
+                    if (j <= NR && a[j] ~ /^  \},?[ ]*$/) {
+                        for (k = i + 1; k <= j; k++) del[k] = 1
+                        i = j
+                    }
+                }
+            }
+            # 第二遍：输出。丢掉孤儿块后，listen 可能变成「最后一项」却还带着逗号
+            # （`"listen": ":7865",` 紧跟收尾 `}` 是非法 JSON）—— 必须把悬空逗号去掉。
+            for (i = 1; i <= NR; i++) {
+                if (del[i]) continue
+                line = a[i]
+                nxt = ""
+                for (k = i + 1; k <= NR; k++) { if (!del[k]) { nxt = a[k]; break } }
+                if (line ~ /,[ ]*$/ && nxt ~ /^\}[ ]*$/) sub(/,[ ]*$/, "", line)
+                print line
+            }
+        }
+      ' "$CFG_FILE" > "$tmp"
+    ) || { log_msg "repair_listen_block: awk 失败，保持原文件不动"; return 0; }
+
+    before=$(wc -l < "$CFG_FILE"); after=$(wc -l < "$tmp")
+    if [ "$after" -lt "$before" ]; then
+        cp -p "$CFG_FILE" "${CFG_FILE}.bak" 2>/dev/null
+        mv "$tmp" "$CFG_FILE"
+        chmod 600 "$CFG_FILE" 2>/dev/null
+        log_msg "已清理 config.json 的 listen 孤儿行（${before} → ${after} 行，原件备份为 config.json.bak）"
     else
-        sed -i "1a ${line}" "$CFG_FILE"
+        # 结构没认出来：不写回，保留 0600 的 .repair 供人工排查（绝不动用户的 config.json）
+        log_msg "repair_listen_block: 未匹配到可安全清理的结构，保持 config.json 原样（候选结果留在 ${tmp}）"
     fi
+    return 0
 }
 
 write_config() {
     mkdir -p "$CFG_DIR" "$AUTH_DIR"
     if [ ! -f "$CFG_FILE" ]; then
-        cat > "$CFG_FILE" <<EOF
+        # umask 077 + 显式 chmod：这份文件里有 api_key 和管理面板密码，
+        # 默认 umask 建出来是 0644，NAS 上同机任意用户/其它容器都能读走凭据。
+        ( umask 077
+          cat > "$CFG_FILE" <<EOF
 {
   "listen": "${WILDWORK_LISTEN}",
   "api_key": "$(json_escape "$SECRET")",
@@ -81,14 +134,26 @@ write_config() {
   "region": "${WILDWORK_REGION}"
 }
 EOF
-        log_msg "首次启动：生成 ${CFG_FILE}（listen=${WILDWORK_LISTEN}）"
+        )
+        chmod 600 "$CFG_FILE" 2>/dev/null
+        log_msg "首次启动：生成 ${CFG_FILE}（listen=${WILDWORK_LISTEN}，权限 600）"
         return 0
     fi
-    # 已存在 = 用户可能在面板里加过渠道/代理，只回写向导管理的三个字段。
-    patch_top_level "listen" "${WILDWORK_LISTEN}"
-    patch_top_level "api_key" "$(json_escape "$SECRET")"
-    patch_top_level "admin_password" "$(json_escape "$SECRET")"
-    log_msg "按向导回写 listen=${WILDWORK_LISTEN}，密码字段保持同步"
+    # 已存在：一个字都不改。
+    #
+    # 为什么彻底放弃按行回写（旧版这里会 sed 改 listen / api_key / admin_password）：
+    #   ① 程序用 MarshalIndent 整体重写 config.json，Listen 是 {host, port} 结构体且
+    #      没有自定义 MarshalJSON，落盘是多行对象；按行替换只动了首行，剩下的
+    #      host/port/}, 变孤儿行 → JSON 非法 → LoadOrCreate 失败 → main.go fatal 退出。
+    #      这就是 v0.1.10「应用中心点打开后几秒退回启用按钮、重启也救不回」的根因。
+    #   ② sed 替换串里的 & 会展开成整行匹配、值含 | 会让表达式静默不生效：管理密码带
+    #      这两个字符就当场把配置写坏（已实测复现 `"api_key": "a  "api_key": "old",b"`）。
+    #   ③ 更根本的是这三个值**本来就不靠文件生效**：config.applyEnv 在解析文件之后执行，
+    #      WILDWORK_LISTEN / WILDWORK_API_KEY / WILDWORK_ADMIN_PASSWORD 优先级更高。
+    #      改文件纯属多余，只留下把用户配置写坏的机会。
+    # 结论：向导值一律走环境变量，config.json 交给程序自己管。
+    log_msg "config.json 已存在，保持不动（监听/密钥以 WILDWORK_* 环境变量为准）"
+    return 0
 }
 
 start_process() {
@@ -100,11 +165,26 @@ start_process() {
 
     resolve_secret
     write_config
+    # 必须在拉起进程之前跑：config.json 非法会让程序启动即 fatal 退出。
+    repair_listen_block
 
     log_msg "Starting process ..."
     # --no-tray：NAS 上没有桌面环境，带托盘会 panic（官方镜像同样这么起）。
-    bash -c "${BIN} --no-tray" 2>&1 &
-    printf "%s" "$!" > ${PID_FILE}
+    #
+    # 输出必须落进 info.log：程序在「config.json 非法 / 端口被占 / 对外监听未设管理密码」
+    # 时是 fatal 退出并把原因打到 stderr。旧版写的是 `2>&1 &` 不落地，用户只能看到
+    # 「点了没起来」，零线索 —— 本次事故排查成本全拜此所赐。
+    bash -c "${BIN} --no-tray" >> "${LOG_FILE}" 2>&1 &
+    pid=$!
+    printf "%s" "$pid" > ${PID_FILE}
+    # 起来后要校验。旧版 start_process 无论成败都 return 0，进程秒退时应用中心照样显示
+    # 「运行中」，故障被完全吞掉（现象就是「点打开，几秒后自己退回启用按钮」却毫无提示）。
+    sleep 2
+    if ! check_process "$pid"; then
+        log_msg "启动失败：进程已退出（pid=${pid}）。请看 ${LOG_FILE} 末尾的 fatal 原因 —— 常见：config.json 非法、端口 ${LISTEN_PORT} 被占用、对外监听未设管理密码"
+        return 1
+    fi
+    log_msg "进程已启动 pid=${pid} listen=${LISTEN_PORT}"
     return 0
 }
 
