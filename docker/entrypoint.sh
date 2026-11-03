@@ -17,7 +17,9 @@ json_escape() {
     printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr -d '\r\n\t'
 }
 
-HOME_DIR="${WILDWORK_HOME:-/app}"
+# 配置与凭据放持久卷 /data（而非容器层 /app）：否则容器一重建，面板里改过的
+# api_key / 管理密码就没了 —— 这正是「面板改了密码、重启被回滚」的另一半成因。
+HOME_DIR="${WILDWORK_HOME:-/data}"
 LISTEN="${WILDWORK_LISTEN:-:7863}"
 API_KEY="${WILDWORK_API_KEY:-}"
 ADMIN_PASSWORD="${WILDWORK_ADMIN_PASSWORD:-}"
@@ -66,8 +68,26 @@ GROWTH_TRAVEL_LOC=$(to_int "$GROWTH_TRAVEL_LOC" 1)
 mkdir -p "$HOME_DIR" "$AUTH_DIR"
 mkdir -p "$(dirname "$STATE_FILE")"
 
-# ---------- 生成 config.json（只写必要字段；未写字段由程序用默认值补齐） ----------
-cat > "$HOME_DIR/config.json" <<EOF
+# ---------- config.json：只在首次生成，之后由程序/面板拥有 ----------
+#
+# 为什么不再每次重写：面板保存设置会写 config.json，而 entrypoint 每次都按环境变量
+# 重新生成 → 用户在面板里改的 api_key / 管理密码在下次重启被 compose 里的值盖掉
+# （现象：改完密码当下有效，重启后旧密码又能登、新密码不行，客户端全部 401）。
+# 现在凭据以文件为准（对齐 workbuddy2api-panel 的做法：config.json 是唯一真源，
+# 环境变量只管 listen）。applyEnv 只在环境变量**非空**时才覆盖，所以 unset 即让位。
+CFG_FILE="${HOME_DIR}/config.json"
+if [ -f "$CFG_FILE" ]; then
+    unset WILDWORK_API_KEY WILDWORK_ADMIN_PASSWORD
+    echo "[entrypoint] 沿用已存在的 ${CFG_FILE}（面板改过的 api_key/管理密码不会被环境变量覆盖）"
+    # 对外监听必须有鉴权：环境变量没给密码时，要确认文件里已经设过，否则照旧拒绝启动。
+    if [ -z "$ADMIN_PASSWORD" ] && ! grep -q '"admin_password"[ ]*:[ ]*"[^"]' "$CFG_FILE"; then
+        echo "[entrypoint]   ✗ 无法启动：监听 ${LISTEN} 已对外暴露，但环境变量与 ${CFG_FILE} 里都没有管理密码。"
+        echo "[entrypoint]     请设置 WILDWORK_ADMIN_PASSWORD 后重启（避免局域网内任意设备无凭据打开面板）。"
+        exit 1
+    fi
+else
+    ( umask 077
+      cat > "$CFG_FILE" <<EOF
 {
   "listen": "$(json_escape "$LISTEN")",
   "api_key": "$(json_escape "$API_KEY")",
@@ -91,29 +111,32 @@ cat > "$HOME_DIR/config.json" <<EOF
   }
 }
 EOF
-
-echo "[entrypoint] 已生成 $HOME_DIR/config.json"
-echo "[entrypoint]   listen=${LISTEN}  region=${REGION}  timeout=${TIMEOUT}s"
-echo "[entrypoint]   auth_dir=${AUTH_DIR}"
-echo "[entrypoint]   state_file=${STATE_FILE}"
-if [ -z "$API_KEY" ]; then
-    echo "[entrypoint]   ⚠️  API_KEY 为空：OpenAI 兼容接口无鉴权！仅限本机/内网，切勿暴露公网"
-else
-    echo "[entrypoint]   api_key=<已设置>"
-fi
-if [ -n "$ADMIN_PASSWORD" ]; then
-    echo "[entrypoint]   admin_password=<已设置>（Web 面板需登录）"
-elif is_loopback; then
-    echo "[entrypoint]   admin_password 为空（仅本机监听，面板不鉴权）"
-else
-    echo "[entrypoint]   ✗ 无法启动：监听 ${LISTEN} 已对外暴露，但没有设置 WILDWORK_ADMIN_PASSWORD。"
-    echo "[entrypoint]     程序会拒绝启动 —— 这是为了避免局域网内任意设备无凭据打开管理面板"
-    echo "[entrypoint]     （面板可增删账号、退出进程）。请在 compose 里设置 WILDWORK_ADMIN_PASSWORD 后重启。"
-    exit 1
+    )
+    chmod 600 "$CFG_FILE" 2>/dev/null
+    echo "[entrypoint] 首次启动：已生成 $CFG_FILE（权限 600）"
+    echo "[entrypoint]   listen=${LISTEN}  region=${REGION}  timeout=${TIMEOUT}s"
+    echo "[entrypoint]   auth_dir=${AUTH_DIR}"
+    echo "[entrypoint]   state_file=${STATE_FILE}"
+    if [ -z "$API_KEY" ]; then
+        echo "[entrypoint]   ⚠️  API_KEY 为空：OpenAI 兼容接口无鉴权！仅限本机/内网，切勿暴露公网"
+    else
+        echo "[entrypoint]   api_key=<已设置>"
+    fi
+    if [ -n "$ADMIN_PASSWORD" ]; then
+        echo "[entrypoint]   admin_password=<已设置>（Web 面板需登录）"
+    elif is_loopback; then
+        echo "[entrypoint]   admin_password 为空（仅本机监听，面板不鉴权）"
+    else
+        echo "[entrypoint]   ✗ 无法启动：监听 ${LISTEN} 已对外暴露，但没有设置 WILDWORK_ADMIN_PASSWORD。"
+        echo "[entrypoint]     程序会拒绝启动 —— 这是为了避免局域网内任意设备无凭据打开管理面板"
+        echo "[entrypoint]     （面板可增删账号、退出进程）。请在 compose 里设置 WILDWORK_ADMIN_PASSWORD 后重启。"
+        exit 1
+    fi
 fi
 if [ -n "$GROWTH_REDEEM$GROWTH_TRAVEL" ] && { is_true "$GROWTH_REDEEM" || is_true "$GROWTH_TRAVEL"; }; then
     echo "[entrypoint]   ⚠️  成长自动化已开启（兑换抽奖=${GROWTH_REDEEM} 猫猫旅行=${GROWTH_TRAVEL}）："
     echo "[entrypoint]     这些动作会**真实改变账号状态**（消耗抽奖次数不可撤销），请确认已知悉。"
 fi
 
-exec /app/workbuddy-api --no-tray
+# WILDWORK_BIN 仅为测试/定制留的口子（默认容器内路径），让打包逻辑能被脚本回归覆盖。
+exec "${WILDWORK_BIN:-/app/workbuddy-api}" --no-tray

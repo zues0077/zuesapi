@@ -1563,15 +1563,31 @@ async function importLocal(channel) {
   }
 }
 
+// 使用「本机回调」的渠道：程序在 NAS / 容器里跑时，浏览器被重定向到的 127.0.0.1
+// 是用户自己的电脑，回调端口没人监听 → 页面报拒绝连接，但授权其实已经成功、
+// 凭证就在那条 URL 里。对这些渠道显示「粘贴回调」兜底入口。
+// qoder 系走设备码轮询、智谱清言走 CDP/粘 Cookie、小浣熊走协议深链，都不需要。
+const CALLBACK_LOGIN_CHANNELS = new Set(["traework", "traecode", "qwenwork"]);
+let loginChannel = "";
+
 async function startLogin(channel) {
   try {
     const r = await api("/api/login/start", { channel });
     const url = r.auth_url;
     if (!url) { toast("无法获取登录链接"); return; }
+    loginChannel = channel;
     $("loginTitle").textContent = `添加 ${chLabel(channel)} 账号`;
     $("loginMsg").textContent = hasProtocolLogin(channel)
       ? `请在浏览器新窗口中完成${chLabel(channel)}登录；完成后本工具会自动接管回调并保存账号（期间请勿启动${chLabel(channel)}客户端）。`
       : "请在浏览器新窗口中完成登录…";
+    // 兜底粘贴框：按渠道显示，并清空上一轮残留
+    const useCb = CALLBACK_LOGIN_CHANNELS.has(channel);
+    $("cbFallback").classList.toggle("hidden", !useCb);
+    if (useCb) {
+      $("cbInput").value = "";
+      $("cbErr").textContent = "";
+      $("loginMsg").textContent += " 若程序跑在 NAS/容器里、回调页打不开，把地址栏内容粘到下面即可。";
+    }
     $("loginOverlay").classList.remove("hidden");
     $("btnCopyUrl").dataset.url = url;
     window.open(url, "_blank", "noopener,noreferrer");
@@ -1581,11 +1597,33 @@ async function startLogin(channel) {
   }
 }
 
+// submitCallback 把手工粘贴的回调地址交给后端，之后沿用同一套轮询完成兑换。
+async function submitCallback() {
+  const text = $("cbInput").value.trim();
+  const errBox = $("cbErr");
+  errBox.textContent = "";
+  if (!text) { errBox.textContent = "请先粘贴浏览器地址栏里的完整回调地址"; return; }
+  const btn = $("btnSubmitCallback");
+  btn.disabled = true;
+  try {
+    await api("/api/login/callback", { channel: loginChannel, url: text });
+    errBox.textContent = "";
+    $("cbInput").value = "";
+    toast("已收到回调，正在兑换账号…", 6000);
+    startLoginPoll(); // 立即再轮询一次，不用等下一个 2s 周期
+  } catch (e) {
+    errBox.textContent = e.message || "提交失败";
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 async function cancelLogin() {
   try {
     await api("/api/login/cancel", {});
     stopLoginPoll();
     $("loginOverlay").classList.add("hidden");
+    $("cbFallback").classList.add("hidden");
     toast("登录已取消");
   } catch (e) { toast(e.message); }
 }
@@ -1606,6 +1644,7 @@ function startLoginPoll() {
       if (!st.login_busy) {
         stopLoginPoll();
         $("loginOverlay").classList.add("hidden");
+        $("cbFallback").classList.add("hidden");
         // 后端在 login_error 里回传终态失败（超时/回调不可用/兑换失败）；
         // 拿不到就是真的成功了。
         if (st.login_error) {
@@ -2201,6 +2240,7 @@ function bind() {
   $("btnJSONBatchCancel").onclick = () => $("jsonBatchOverlay").classList.add("hidden");
   $("btnJSONBatchSubmit").onclick = submitJSONBatch;
   $("btnExportAll").onclick = exportAllAccounts;
+  $("btnSubmitCallback").onclick = submitCallback;
   $("btnSavePublicURL").onclick = savePublicURL;
   // 点遮罩空白处关闭：与其它弹层一致。批量导入是长耗时操作，关不掉会被误判成卡死。
   $("jsonBatchOverlay").addEventListener("click", (e) => {

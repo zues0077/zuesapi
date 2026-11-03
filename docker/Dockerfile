@@ -29,8 +29,12 @@ RUN chmod +x /app/workbuddy-api /app/entrypoint.sh
 VOLUME ["/data"]
 EXPOSE 7863
 
-# 配置全部通过 WILDWORK_* 环境变量传入，由 entrypoint 在容器内生成 config.json。
-ENV WILDWORK_HOME="/app" \
+# WILDWORK_HOME=/data：让 config.json 落进**持久卷**，容器重建后面板改过的
+# api_key / 管理密码不再丢（旧值 /app 在容器层，每次重建都退回 entrypoint
+# 按环境变量重写的那份 —— 这就是「面板改了密码、重启又变回去」的成因之一）。
+# 其余配置仍可由 WILDWORK_* 覆盖；但 entrypoint 在 config.json 已存在时会
+# unset 凭据类变量，把 api_key / admin_password 的所有权交还给文件。
+ENV WILDWORK_HOME="/data" \
     WILDWORK_LISTEN=":7863" \
     WILDWORK_AUTH_DIR="/data/auths" \
     WILDWORK_STATE_FILE="/data/state.json" \

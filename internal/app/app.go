@@ -2334,6 +2334,23 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"auth_url": url})
 	})
+	// 手工交回浏览器回调地址：解决「程序在 NAS/容器、浏览器在电脑」时本机回调送不回来
+	// （授权已成功，凭证在地址栏那条 URL 里）。详见 login_callback.go。
+	mux.HandleFunc("POST /api/login/callback", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Channel string `json:"channel"`
+			URL     string `json:"url"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			apiError(w, http.StatusBadRequest, "请求体解析失败")
+			return
+		}
+		if err := a.SubmitLoginCallback(req.Channel, req.URL); err != nil {
+			apiError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	})
 	mux.HandleFunc("POST /api/login/cancel", func(w http.ResponseWriter, r *http.Request) {
 		if err := a.CancelLogin(); err != nil {
 			apiError(w, http.StatusBadRequest, err.Error())
@@ -2613,7 +2630,7 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 			"api_base":   config.APIBaseFromPublic(v),
 		})
 	})
-mux.HandleFunc("POST /api/config/admin_password", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /api/config/admin_password", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Password string `json:"password"`
 		}

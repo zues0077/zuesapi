@@ -211,6 +211,22 @@
         <button class="btn small" id="btnCopyUrl">复制链接</button>
         <button class="btn small danger" id="btnCancelLogin">取消</button>
       </div>
+      <!-- 跨机部署兜底：程序跑在 NAS / 容器里时，本机回调（127.0.0.1:随机端口）指的是
+           浏览器所在的那台电脑，端口没人监听 → 拒绝连接。授权其实已经成功，凭证就在那条
+           URL 里。仅对使用本机回调的渠道显示（千问办公 / TraeWork）。 -->
+      <div id="cbFallback" class="hidden">
+        <div class="cfg-sep"></div>
+        <div class="hint">浏览器显示「拒绝连接 / 无法访问」？<b>授权其实已经成功了</b> ——
+          复制浏览器<b>地址栏里那条完整地址</b>粘到下面，程序按同样的流程继续兑换。</div>
+        <div class="row" style="align-items:flex-start">
+          <input id="cbInput" class="input grow" spellcheck="false" autocomplete="off"
+            placeholder="http://127.0.0.1:43985/callback?code=… （也可以只贴 code 值）">
+        </div>
+        <div class="login-buttons">
+          <button class="btn small primary" id="btnSubmitCallback">提交回调</button>
+        </div>
+        <div class="hint" id="cbErr" style="color:var(--danger)"></div>
+      </div>
     </div>
   </div>
 </div>

@@ -325,6 +325,47 @@ func ParseCallback(rawURL string) CallbackInfo {
 	return info
 }
 
+// SubmitCallback 让用户把浏览器地址栏里那串回调地址**手工**交回来。
+//
+// 为什么必须有这条路：授权页完成后，上游把浏览器重定向到
+// `http://127.0.0.1:<随机端口>/authorize?refreshToken=…`。这个 127.0.0.1 指的是
+// **浏览器所在的那台机器**。程序与浏览器同机（Windows 单文件版）时回调 server 收得到；
+// 程序跑在 NAS / 容器里时，浏览器重定向到的是用户自己的电脑，那个端口没人监听 →
+// 拒绝连接。**授权其实已经成功，凭证就躺在那条 URL 里，只是送不回程序这边。**
+//
+// 这里刻意复用回调 server 的同一套解析与落盘（ParseCallback + writeState），
+// 所以 Poll 的后续行为、错误固化、超时清理与自动路径一字不差 —— 不会出现
+// 「手工粘贴能成、自动回调不行」这类两套实现漂移。
+// 同理适用于千问办公（见 internal/login_qwenwork.SubmitCallback）。
+func SubmitCallback(statePath, pasted string) error {
+	var st state
+	blob, err := os.ReadFile(statePath) // 与 Poll 同一份 state（该包无读 helper，沿用既有读法）
+	if err != nil {
+		return fmt.Errorf("没有进行中的登录：请先点「+ TraeWork」拿到授权链接，授权完再粘贴回调")
+	}
+	if err := json.Unmarshal(blob, &st); err != nil {
+		return fmt.Errorf("登录状态文件损坏，请取消后重新登录：%w", err)
+	}
+	info := ParseCallback(pasted)
+	if info.RefreshToken == "" && info.AccessToken == "" && info.AuthCode == "" {
+		return fmt.Errorf("粘贴的内容里没解析出凭证：需要浏览器地址栏那条**完整**回调地址（含 ?refreshToken=… 或 ?authCodeInfo=…）")
+	}
+	if st.Host == "" {
+		st.Host = traework.OAuthHost
+	}
+	st.RefreshToken = info.RefreshToken
+	st.AccessToken = info.AccessToken
+	st.AuthCode = info.AuthCode
+	st.Err = "" // 清掉可能已固化的终态错误，让 Poll 走兑换
+	if err := writeState(statePath, st); err != nil {
+		return err
+	}
+	// 只记「有没有取到某类凭证」，绝不记凭证本身（不变量 2：日志零 token）。
+	log.Printf("traework 登录：已接受手工粘贴的回调 refresh=%v access=%v authCode=%v",
+		info.RefreshToken != "", info.AccessToken != "", info.AuthCode != "")
+	return nil
+}
+
 // authCodeFromInfo 从 authCodeInfo（原始 code 或 JSON 对象）提取 AuthCode。
 func authCodeFromInfo(raw string) string {
 	raw = strings.TrimSpace(raw)

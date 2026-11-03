@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -147,6 +148,58 @@ func Start(_ *http.Client, statePath string) (string, error) {
 	srvOnce = sync.Once{} // 允许下次登录重新 Start
 
 	return authURL, nil
+}
+
+// SubmitCallback 让用户把浏览器地址栏里那串回调地址**手工**交回来。
+//
+// 为什么必须有这条路（与 internal/login_trae.SubmitCallback 同一个缺陷）：授权完成后
+// 上游把浏览器重定向到 `http://127.0.0.1:<随机端口>/callback?code=…`，而这个
+// 127.0.0.1 是**浏览器所在机器**。程序在 NAS / 容器里跑时，浏览器重定向到用户自己的
+// 电脑，端口没人监听 → 拒绝连接；**授权其实已经成功，code 就在那条 URL 里**，
+// 只是送不回程序这边。
+//
+// 注入走的是回调 server 用的同一个 pending 通道，所以 Poll 的兑换、超时、清理逻辑
+// 与自动路径完全一致，不存在两套实现。
+//
+// 接受三种粘贴形态：完整回调 URL、只带 query 的片段、裸 code（用户常只复制 code 值）。
+func SubmitCallback(statePath, pasted string) error {
+	pasted = strings.TrimSpace(pasted)
+	if pasted == "" {
+		return fmt.Errorf("粘贴内容为空")
+	}
+	// 必须有进行中的登录：否则一个迟到的粘贴会把 code 塞进 pending，
+	// 污染下一次登录的兑换（state 文件在 Poll 成功/超时/取消时都会删）。
+	if _, err := os.Stat(statePath); err != nil {
+		return fmt.Errorf("没有进行中的登录：请先点「+ 千问办公」拿到授权链接，授权完再粘贴回调")
+	}
+
+	code, errMsg := "", ""
+	if u, err := url.Parse(pasted); err == nil && (u.Scheme != "" || strings.Contains(pasted, "?")) {
+		q := u.Query()
+		if e := q.Get("error"); e != "" {
+			errMsg = e
+			if d := q.Get("error_description"); d != "" {
+				errMsg = d + " (" + e + ")"
+			}
+		} else {
+			code = q.Get("code")
+		}
+	} else {
+		code = pasted // 裸 code
+	}
+
+	if errMsg != "" {
+		pending.fail(errMsg)
+		log.Printf("qwenwork 登录：手工粘贴的回调带 error=%s，已按失败处理", errMsg)
+		return nil
+	}
+	if code == "" {
+		return fmt.Errorf("没解析出 code：请粘贴浏览器地址栏里那条完整回调地址（含 ?code=…），或只贴 code 值")
+	}
+	pending.set(code)
+	// 只记长度，绝不记 code（不变量 2：日志零凭据）。
+	log.Printf("qwenwork 登录：已接受手工粘贴的授权码（%d 字符），等待兑换", len(code))
+	return nil
 }
 
 // Poll 单次检查登录结果；未完成返回 ErrPending；成功兑换 token 并清理。
@@ -283,12 +336,25 @@ func SaveAuth(authDir string, r Result) (string, error) {
 // ---------------------------------------------------------------------------
 
 // pendingCode 操作
-func (p *pendingCode) reset()              { p.mu.Lock(); p.code, p.errMsg, p.received = "", "", false; p.mu.Unlock() }
-func (p *pendingCode) set(code string)     { p.mu.Lock(); p.code, p.received = code, true; p.mu.Unlock() }
-func (p *pendingCode) fail(msg string)     { p.mu.Lock(); p.errMsg, p.received = msg, true; p.mu.Unlock() }
+func (p *pendingCode) reset() {
+	p.mu.Lock()
+	p.code, p.errMsg, p.received = "", "", false
+	p.mu.Unlock()
+}
+func (p *pendingCode) set(code string) { p.mu.Lock(); p.code, p.received = code, true; p.mu.Unlock() }
+func (p *pendingCode) fail(msg string) { p.mu.Lock(); p.errMsg, p.received = msg, true; p.mu.Unlock() }
+
+// snapshot 返回 (code, errMsg, 是否拿到 code)。
+//
+// ok 的语义必须是「拿到了 code」，不能直接用 received：fail() 也会把 received
+// 置 true，于是 Poll 里的 `if !ok { if errMsg != "" → 按失败返回 }` 永远进不去，
+// 用户在上游页面点「取消」时拿到的是「token exchange: missing access_token」
+// 这种莫名其妙的消息，而不是真实原因（access_denied / user cancelled）。
+// 该缺陷由 TestSubmitCallback_ErrorParam 抓到。
 func (p *pendingCode) snapshot() (code, errMsg string, ok bool) {
-	p.mu.Lock(); defer p.mu.Unlock()
-	return p.code, p.errMsg, p.received
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.code, p.errMsg, p.code != ""
 }
 
 // makePKCE 生成 verifier + S256 challenge（43 字符 base64url，RFC 7636）。
