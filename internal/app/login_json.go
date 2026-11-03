@@ -111,11 +111,20 @@ func jsonLoginKind(channel string) (provider.Kind, error) {
 // 20 次全渠道重扫 + 20 次 afterAccountAdded（会真实打上游接口）。批量在末尾
 // 统一 reload 一次、按渠道各触发一次后置动作即可。
 func (a *App) importAuthJSON(k provider.Kind, jsonText string) (uid, file string, err error) {
+	return a.importAuthJSONWithBudget(k, jsonText, nil)
+}
+
+// importAuthJSONWithBudget 同上，但允许调用方限制「缺 uid 的 glm 条目触发上游验证」的次数。
+//
+// 批量路径必须限额：glm 每条没有 uid 的凭据都会真实打一次 Validate，200 条就可能是
+// 200 次串行上游请求（几分钟），期间面板请求一直挂着。预算用满后同类条目直接失败，
+// 不再打上游；单条路径传 nil，行为与以前一致（只验一条，没有放大问题）。
+func (a *App) importAuthJSONWithBudget(k provider.Kind, jsonText string, glmValidateBudget *int) (uid, file string, err error) {
 	jsonText = strings.TrimSpace(jsonText)
 	if jsonText == "" {
 		return "", "", fmt.Errorf("凭据 JSON 为空")
 	}
-	doc, err := parseAuthJSON(k, jsonText)
+	doc, err := parseAuthJSONWithBudget(k, jsonText, glmValidateBudget)
 	if err != nil {
 		return "", "", err
 	}
@@ -244,6 +253,10 @@ func authToExportDoc(au *auth.Auth) map[string]any {
 
 // parseAuthJSON 把粘贴的 JSON 解析成 authDoc，兼容嵌套与扁平两种格式。
 func parseAuthJSON(k provider.Kind, text string) (authDoc, error) {
+	return parseAuthJSONWithBudget(k, text, nil)
+}
+
+func parseAuthJSONWithBudget(k provider.Kind, text string, glmValidateBudget *int) (authDoc, error) {
 	// 先按嵌套格式解。
 	var nested struct {
 		Auth    authSection    `json:"auth"`
@@ -252,7 +265,7 @@ func parseAuthJSON(k provider.Kind, text string) (authDoc, error) {
 	if err := json.Unmarshal([]byte(text), &nested); err == nil &&
 		(strings.TrimSpace(nested.Auth.AccessToken) != "" || strings.TrimSpace(nested.Auth.RefreshToken) != "") {
 		doc := authDoc{Auth: nested.Auth, Account: nested.Account}
-		return normalizeAuthDoc(k, doc)
+		return normalizeAuthDocWithBudget(k, doc, glmValidateBudget)
 	}
 
 	// 再按扁平格式解。
@@ -278,11 +291,15 @@ func parseAuthJSON(k provider.Kind, text string) (authDoc, error) {
 			Nickname:     strings.TrimSpace(flat.Nickname),
 		},
 	}
-	return normalizeAuthDoc(k, doc)
+	return normalizeAuthDocWithBudget(k, doc, glmValidateBudget)
 }
 
 // normalizeAuthDoc 按渠道补默认值并做基础校验。
 func normalizeAuthDoc(k provider.Kind, doc authDoc) (authDoc, error) {
+	return normalizeAuthDocWithBudget(k, doc, nil)
+}
+
+func normalizeAuthDocWithBudget(k provider.Kind, doc authDoc, glmValidateBudget *int) (authDoc, error) {
 	doc.Auth.AccessToken = strings.TrimSpace(doc.Auth.AccessToken)
 	doc.Auth.RefreshToken = strings.TrimSpace(doc.Auth.RefreshToken)
 	doc.Auth.Domain = strings.TrimSpace(doc.Auth.Domain)
@@ -297,6 +314,12 @@ func normalizeAuthDoc(k provider.Kind, doc authDoc) (authDoc, error) {
 		}
 		// uid 缺失时走上游验证取回（顺带验证凭据有效性）。
 		if strings.TrimSpace(doc.Account.UID) == "" {
+			if glmValidateBudget != nil {
+				if *glmValidateBudget <= 0 {
+					return authDoc{}, fmt.Errorf("glm 凭据缺少 uid，且本次批量已用满 %d 次上游验证；请在凭据里补上 uid 或分批导入（同类条目不再打上游）", jsonBatchValidateLimit)
+				}
+				*glmValidateBudget--
+			}
 			r, err := loginglm.Validate(doc.Auth.RefreshToken)
 			if err != nil {
 				return authDoc{}, fmt.Errorf("glm 凭据验证失败：%w", err)

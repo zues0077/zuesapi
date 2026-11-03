@@ -112,7 +112,7 @@ func TestSubmitJSONAuthBatch_PartialFailure(t *testing.T) {
 	a := newJSONLoginTestApp(t)
 	text := batchText(t, []any{
 		nested("workbuddy", "ok-1", ""),
-		nested("nosuchchannel", "bad-1", ""),         // 渠道不支持
+		nested("nosuchchannel", "bad-1", ""),                       // 渠道不支持
 		map[string]any{"auth": map[string]any{"accessToken": "x"}}, // 缺 channel
 	})
 	res, err := a.SubmitJSONAuthBatch(text)
@@ -261,5 +261,45 @@ func TestExportAllAccountsJSON_ChannelAndDedup(t *testing.T) {
 		if n != 1 {
 			t.Fatalf("账号 %s 出现 %d 次，未按文件去重", uid, n)
 		}
+	}
+}
+
+// TestImportAuthJSON_GLMValidateBudget 预算用满后必须立刻失败，不再打上游。
+// 用 budget=0 直接触发，避免测试依赖网络（真实 Validate 会请求 chatglm）。
+func TestImportAuthJSON_GLMValidateBudget(t *testing.T) {
+	a := newJSONLoginTestApp(t)
+	budget := 0
+	_, _, err := a.importAuthJSONWithBudget(provider.GLM, `{"refreshToken":"rt-x"}`, &budget)
+	if err == nil {
+		t.Fatal("预算用满时仍尝试了上游验证")
+	}
+	if !strings.Contains(err.Error(), "用满") {
+		t.Fatalf("错误信息应说明预算用满，实际：%v", err)
+	}
+}
+
+// TestExportAllAccountsJSON_Warnings 某渠道加载失败时必须回传 warnings，
+// 不能只给出一份「看起来成功」的残缺备份。
+func TestExportAllAccountsJSON_Warnings(t *testing.T) {
+	a := newJSONLoginTestApp(t)
+	okLoader := authLoader{kind: provider.GLM, load: func(string) ([]*auth.Auth, error) {
+		return []*auth.Auth{{UID: "u1", RefreshToken: "rt-1"}}, nil
+	}}
+	badLoader := authLoader{kind: provider.TraeWork, load: func(string) ([]*auth.Auth, error) {
+		return nil, fmt.Errorf("模拟加载失败")
+	}}
+	doc, err := a.exportAllAccountsJSON([]authLoader{okLoader, badLoader})
+	if err != nil {
+		t.Fatalf("部分失败不应整份报错：%v", err)
+	}
+	if n, _ := doc["count"].(int); n != 1 {
+		t.Fatalf("应导出 1 个账号，实际 %v", doc["count"])
+	}
+	warns, ok := doc["warnings"].([]string)
+	if !ok || len(warns) != 1 {
+		t.Fatalf("回执应带 1 条 warnings，实际 %#v", doc["warnings"])
+	}
+	if !strings.Contains(warns[0], "模拟加载失败") {
+		t.Fatalf("warnings 应包含加载器错误，实际 %q", warns[0])
 	}
 }

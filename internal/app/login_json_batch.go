@@ -27,6 +27,13 @@ import (
 // 误粘超大文本（每条都要解析 + 落盘，glm 渠道还可能触发一次上游验证）。
 const jsonBatchLimit = 200
 
+// jsonBatchValidateLimit 一次批量里最多触发多少次「缺 uid 的 glm 上游验证」。
+//
+// glm 凭据没带 uid 时要打一次 Validate 才能拿到 uid；200 条都没带就是 200 次串行
+// 上游请求（几分钟），期间整个导入请求挂住。超过预算后同类条目直接返回可读错误，
+// 让用户补 uid 或分批导入，不给上游无限放大。
+const jsonBatchValidateLimit = 20
+
 // JSONBatchFailure 批量导入里失败的一条（带序号，便于用户对着原文定位）。
 type JSONBatchFailure struct {
 	Index   int    `json:"index"`
@@ -71,6 +78,7 @@ func (a *App) SubmitJSONAuthBatch(text string) (*JSONBatchResult, error) {
 	}
 	res := &JSONBatchResult{Total: len(entries)}
 	seenKind := make(map[provider.Kind]bool, len(entries))
+	glmValidateBudget := jsonBatchValidateLimit
 
 	for i, e := range entries {
 		if e.Err != "" {
@@ -82,7 +90,7 @@ func (a *App) SubmitJSONAuthBatch(text string) (*JSONBatchResult, error) {
 			res.Failed = append(res.Failed, JSONBatchFailure{Index: i, Channel: e.Channel, Error: kerr.Error()})
 			continue
 		}
-		uid, file, ierr := a.importAuthJSON(k, e.Payload)
+		uid, file, ierr := a.importAuthJSONWithBudget(k, e.Payload, &glmValidateBudget)
 		if ierr != nil {
 			res.Failed = append(res.Failed, JSONBatchFailure{Index: i, Channel: string(k), Error: ierr.Error()})
 			continue
@@ -249,12 +257,18 @@ func allAuthLoaders() []authLoader {
 // ⚠️ 输出里是**明文凭据**（磁盘上是 DPAPI 密文/容器内明文，导出统一解回明文），
 // 等同于一份「所有账号的钥匙」。只在已鉴权的面板里提供，日志只记条数。
 func (a *App) ExportAllAccountsJSON() (map[string]any, error) {
+	return a.exportAllAccountsJSON(allAuthLoaders())
+}
+
+// exportAllAccountsJSON 可用注入的加载器列表调用，便于回归「某渠道加载失败时
+// 回执必须带 warnings，而不是静默给出一份残缺备份」。
+func (a *App) exportAllAccountsJSON(loaders []authLoader) (map[string]any, error) {
 	byChannel := map[string]int{}
 	accounts := make([]map[string]any, 0, 16)
 	seen := map[string]bool{}
 	var errs []string
 
-	for _, l := range allAuthLoaders() {
+	for _, l := range loaders {
 		auths, err := l.load(a.cfg.AuthDir)
 		if err != nil {
 			errs = append(errs, fmt.Sprintf("%s: %v", l.kind, err))
@@ -286,11 +300,17 @@ func (a *App) ExportAllAccountsJSON() (map[string]any, error) {
 		return nil, fmt.Errorf("导出失败：%s", strings.Join(errs, "; "))
 	}
 	// 只记条数与渠道分布，绝不记凭据。
-	log.Printf("json 批量导出 账号=%d 渠道=%s", len(accounts), strings.Join(chans, ","))
-	return map[string]any{
+	log.Printf("json 批量导出 账号=%d 渠道=%s 警告=%d", len(accounts), strings.Join(chans, ","), len(errs))
+	out := map[string]any{
 		"version":     Version,
 		"exported_at": time.Now().Format(time.RFC3339),
 		"count":       len(accounts),
 		"accounts":    accounts,
-	}, nil
+	}
+	// 部分渠道加载失败时必须显式告知：否则用户拿到的是一份「看起来成功」的残缺备份，
+	// 换机后才发现少了账号，比整份导出失败难查得多。
+	if len(errs) > 0 {
+		out["warnings"] = errs
+	}
+	return out, nil
 }
