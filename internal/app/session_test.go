@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"workbuddy-api/internal/auth"
 	"workbuddy-api/internal/config"
@@ -211,6 +212,99 @@ func TestSetListenBindFailureReportsRawError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "占用") {
 		t.Fatalf("错误里应带中文可操作提示，实际：%v", err)
+	}
+}
+
+// freeTCPPort 先占一个 127.0.0.1:0 拿系统分配的端口，再立刻释放给调用方使用。
+func freeTCPPort(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("取空闲端口失败：%v", err)
+	}
+	defer ln.Close()
+	return ln.Addr().(*net.TCPAddr).Port
+}
+
+// panelGet 探测面板存活：/api/auth/state 是免登录的接口，未装配前端时也能返回 200。
+func panelGet(t *testing.T, addr string) (*http.Response, error) {
+	t.Helper()
+	client := &http.Client{Timeout: 2 * time.Second}
+	return client.Get("http://" + addr + "/api/auth/state")
+}
+
+// startPanelServer 在随机空闲端口起一个真实 HTTP 服务，根 handler 固定返回 200，
+// 用于验证 SetListen 切换时旧/新监听的真实可达性。
+func startPanelServer(t *testing.T) *App {
+	t.Helper()
+	a := newPanelApp(t, "127.0.0.1", "")
+	a.cfg.Listen.Port = freeTCPPort(t)
+	a.SetRootHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("panel-ok"))
+	}))
+	if err := a.StartServer(); err != nil {
+		t.Fatalf("启动失败：%v", err)
+	}
+	t.Cleanup(a.Stop)
+	return a
+}
+
+// TestSetListenFailureKeepsOldServerRunning 新端口被占用时必须切换失败，且旧面板继续可访问
+// （0.1.10 的现场是「先停旧再绑新」，失败后整站失联）。
+func TestSetListenFailureKeepsOldServerRunning(t *testing.T) {
+	a := startPanelServer(t)
+	oldAddr := a.listenAddr
+
+	busy, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("占位监听失败：%v", err)
+	}
+	defer busy.Close()
+	busyPort := busy.Addr().(*net.TCPAddr).Port
+
+	err = a.SetListen("127.0.0.1", busyPort)
+	if err == nil {
+		t.Fatal("目标端口被占用时应返回错误")
+	}
+	if !strings.Contains(err.Error(), "listen tcp") {
+		t.Fatalf("错误里应带底层 bind 原文，实际：%v", err)
+	}
+	if a.listenAddr != oldAddr {
+		t.Fatalf("切换失败后应继续监听旧地址 %s，实际 %s", oldAddr, a.listenAddr)
+	}
+	resp, err := panelGet(t, oldAddr)
+	if err != nil {
+		t.Fatalf("切换失败后旧面板应仍可访问：%v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("旧面板状态码 = %d，期望 200", resp.StatusCode)
+	}
+}
+
+// TestSetListenSwitchStopsOldServer 切换成功后新端口可访问、旧端口不再响应（旧 server 已关闭）。
+func TestSetListenSwitchStopsOldServer(t *testing.T) {
+	a := startPanelServer(t)
+	oldAddr := a.listenAddr
+
+	newPort := freeTCPPort(t)
+	if err := a.SetListen("127.0.0.1", newPort); err != nil {
+		t.Fatalf("切换到空闲端口应成功：%v", err)
+	}
+	if a.listenAddr == oldAddr {
+		t.Fatalf("切换后监听地址未变：%s", a.listenAddr)
+	}
+	resp, err := panelGet(t, a.listenAddr)
+	if err != nil {
+		t.Fatalf("新端口应可访问：%v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("新面板状态码 = %d，期望 200", resp.StatusCode)
+	}
+	if _, err := panelGet(t, oldAddr); err == nil {
+		t.Fatalf("切换成功后旧端口 %s 不应再响应", oldAddr)
 	}
 }
 

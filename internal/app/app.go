@@ -459,24 +459,38 @@ func (a *App) StartServer() error {
 	return a.serveLocked(a.cfg.Listen.Addr())
 }
 
-// serveLocked 在 newAddr 上启动新服务并切换；调用方需持有 a.mu。
+// serveLocked 在 addr 上启动新服务并切换；调用方需持有 a.mu。
+//
+// 顺序很关键：**先绑新、再停旧**。反过来的话，bind 失败（端口被别的程序占用）时旧面板
+// 已经在 Shutdown 里被关掉，整站失联到重启为止（0.1.10 现场：改端口收到 400 之后就再
+// 也打不开面板）。唯一不能先绑的是「同端口换网卡」（127.0.0.1:7863 → 0.0.0.0:7863）：
+// 两个 listener 无法共存，此时才退化为「停旧 → 绑新 → 失败则回滚旧地址」。
 func (a *App) serveLocked(addr string) error {
-	// 地址未变时直接复用现有 listener：否则「先 Listen 再 Shutdown 旧」在同端口上
-	// 会撞自身（Only one usage of each socket address），导致面板保存映射/密钥时报 400。
+	// 只有「完整地址完全相同」才复用现有 listener（保存映射/密钥、重启同端口等都不该重启服务）。
+	// 同端口不同网卡不算相同，会走下面的切换分支。
 	if a.httpSrv != nil && a.listenAddr == addr {
 		return nil
 	}
-	// 先停旧服务再绑新地址：避免同端口切换时新旧 listener 短暂重叠报「端口被占用」。
-	if old := a.httpSrv; old != nil {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		_ = old.Shutdown(shutdownCtx)
-		cancel()
-		a.httpSrv = nil
-	}
+	oldAddr := a.listenAddr
+
 	ln, err := net.Listen("tcp", addr)
+	if err != nil && a.httpSrv != nil && sameListenPort(oldAddr, addr) {
+		// 同端口换网卡：旧 listener 还占着这个端口，必须先释放再重试。
+		a.shutdownLocked()
+		ln, err = net.Listen("tcp", addr)
+		if err != nil {
+			// 失败路径：把旧地址重新绑起来，保证面板不失联；回滚也失败则如实返回原始错误。
+			a.restoreLocked(oldAddr)
+			return err
+		}
+	}
 	if err != nil {
+		// 旧服务原样保留（尚未 Shutdown）：调用方拿到带 bind 原文的错误。
 		return err
 	}
+
+	// 新监听已经就绪，才停旧；旧 listener 随 Shutdown 关闭，Serve goroutine 返回 ErrServerClosed 退出。
+	a.shutdownLocked()
 	srv := &http.Server{
 		Handler:           a.serveHandler(),
 		ReadHeaderTimeout: 30 * time.Second,
@@ -489,6 +503,51 @@ func (a *App) serveLocked(addr string) error {
 		}
 	}()
 	return nil
+}
+
+// shutdownLocked 停掉当前服务并清空状态；调用方需持有 a.mu。
+// Shutdown 会关闭 listener 并等待处理中的请求（最多 2s），随后 Serve 返回 ErrServerClosed，goroutine 退出。
+func (a *App) shutdownLocked() {
+	old := a.httpSrv
+	a.httpSrv = nil
+	a.listenAddr = ""
+	if old == nil {
+		return
+	}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	_ = old.Shutdown(shutdownCtx)
+	cancel()
+}
+
+// restoreLocked 尽力把旧地址重新绑起来（同端口切换失败时的回滚），调用方需持有 a.mu。
+func (a *App) restoreLocked(addr string) {
+	if addr == "" {
+		return
+	}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		log.Printf("监听回滚失败：%s 已不可用：%v", addr, err)
+		return
+	}
+	srv := &http.Server{
+		Handler:           a.serveHandler(),
+		ReadHeaderTimeout: 30 * time.Second,
+	}
+	a.httpSrv = srv
+	a.listenAddr = addr
+	go func() {
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+			log.Printf("http serve %s: %v", addr, err)
+		}
+	}()
+	log.Printf("新监听绑定失败，已回滚到 %s", addr)
+}
+
+// sameListenPort 判断两个监听地址是否是同一个端口（忽略网卡地址）。
+func sameListenPort(a, b string) bool {
+	_, pa, ea := net.SplitHostPort(a)
+	_, pb, eb := net.SplitHostPort(b)
+	return ea == nil && eb == nil && pa == pb
 }
 
 // Stop 停止 HTTP 服务（退出时调用）。
