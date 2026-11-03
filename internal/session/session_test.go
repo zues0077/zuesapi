@@ -176,9 +176,15 @@ func TestGCLifecycle(t *testing.T) {
 	r.StopGC()
 	r.StopGC() // 幂等
 	// 停掉后不再清理：塞一条过期项，等两个周期应仍在
+	// 直接写 entries 必须持锁：GC goroutine 可能刚被唤醒，无锁读写本身也是 data race。
+	r.mu.Lock()
 	r.entries["z"] = entry{uid: "a", lastActive: time.Now().Add(-time.Hour)}
+	r.mu.Unlock()
 	time.Sleep(20 * time.Millisecond)
-	if _, ok := r.entries["z"]; !ok {
+	r.mu.Lock()
+	_, ok := r.entries["z"]
+	r.mu.Unlock()
+	if !ok {
 		t.Error("StopGC 后不应再清理（说明 goroutine 没退出）")
 	}
 }

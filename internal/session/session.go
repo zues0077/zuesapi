@@ -63,6 +63,7 @@ type Router struct {
 	entries map[string]entry
 	cfg     Config
 	stop    chan struct{}
+	done    chan struct{} // GC goroutine 退出信号：StopGC 等它真正结束才返回
 }
 
 // New 构建路由器。TTL/GCInterval 非正取默认（30m / 5m）；Available nil 视为空池。
@@ -90,10 +91,13 @@ func (r *Router) StartGC() {
 		return
 	}
 	stop := make(chan struct{})
+	done := make(chan struct{})
 	r.stop = stop
+	r.done = done
 	r.mu.Unlock()
 
 	go func() {
+		defer close(done)
 		t := time.NewTicker(r.cfg.GCInterval)
 		defer t.Stop()
 		for {
@@ -108,12 +112,23 @@ func (r *Router) StartGC() {
 }
 
 // StopGC 停止后台 GC（幂等）。
+//
+// 必须等 goroutine 真正退出再返回：select 在 stop 已关闭时仍可能已选中 tick，
+// 该轮 gcOnce 会卡在 r.mu 上，等 StopGC 放锁后继续清理 —— 调用方在 StopGC
+// 返回之后才写 entries，就会看到「停了还在清理」的假象（测试会随机红）。
 func (r *Router) StopGC() {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.stop != nil {
-		close(r.stop)
-		r.stop = nil
+	if r.stop == nil {
+		r.mu.Unlock()
+		return
+	}
+	close(r.stop)
+	done := r.done
+	r.stop = nil
+	r.done = nil
+	r.mu.Unlock()
+	if done != nil {
+		<-done
 	}
 }
 
