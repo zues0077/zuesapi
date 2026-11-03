@@ -1750,7 +1750,15 @@ func (a *App) SetListen(host string, port int) error {
 		return errors.New("监听非 127.0.0.1 时必须先设置「管理密码」（设置面板中一并保存）")
 	}
 	if err := a.serveLocked(next.Addr()); err != nil {
-		return fmt.Errorf("监听 %s 失败（可能被占用）：%v", next.Addr(), err)
+		// 诊断：把底层 bind 原文（如 "bind: address already in use"）写进日志并回显给面板。
+		// 以前失败只在访问日志里留一个 400 + 字节数，用户与 info.log/app.log 都看不到原因
+		// （0.1.10 现场就是这样：面板改端口失败，重启后才知道端口根本没切）。
+		msg := fmt.Sprintf("监听 %s 失败：%v", next.Addr(), err)
+		if hint := listenBindHint(err); hint != "" {
+			msg += "（" + hint + "）"
+		}
+		log.Printf("%s", msg)
+		return errors.New(msg)
 	}
 	a.cfg.Listen = next
 	if err := config.Save(a.cfg, a.cfgPath); err != nil {
@@ -1758,6 +1766,26 @@ func (a *App) SetListen(host string, port int) error {
 	}
 	log.Printf("API 监听已切换至 %s", next.Addr())
 	return nil
+}
+
+// listenBindHint 把 net.Listen 的底层报错翻成能直接照做的中文提示。
+// Unix 与 Windows 的文案不同（"address already in use" / "Only one usage of each
+// socket address"），两种都要认；认不出就返回空串，由调用方只回显原文。
+func listenBindHint(err error) string {
+	s := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(s, "address already in use"),
+		strings.Contains(s, "only one usage"),
+		strings.Contains(s, "in use"):
+		return "端口已被其它程序占用（如 Lucky/nginx 或同程序的旧进程），换端口或先释放占用"
+	case strings.Contains(s, "permission denied"),
+		strings.Contains(s, "forbidden by its access permissions"):
+		return "当前用户无权绑定该端口；1024 以下的端口需要特权，NAS 上请改用 1024 以上"
+	case strings.Contains(s, "cannot assign requested address"),
+		strings.Contains(s, "no such host"):
+		return "本机没有这个网卡地址；监听应填 0.0.0.0 / 127.0.0.1 / 本机局域网 IP"
+	}
+	return ""
 }
 
 // SetPublicURL 设置「外网访问地址」：只影响面板顶栏显示与复制的 API 地址，

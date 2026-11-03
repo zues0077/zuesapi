@@ -2,6 +2,7 @@ package app
 
 import (
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -185,6 +186,31 @@ func TestSetListenRequiresPassword(t *testing.T) {
 	}
 	if err := a.SetAdminPassword(""); err != nil {
 		t.Fatalf("环回监听下清空密码应成功：%v", err)
+	}
+}
+
+// TestSetListenBindFailureReportsRawError 端口被占时，错误必须带底层 bind 原文与可操作提示，
+// 而不是只让面板收到一个「监听失败」的 400（0.1.10 现场就是日志里只有 400/187 字节）。
+func TestSetListenBindFailureReportsRawError(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("占位监听失败：%v", err)
+	}
+	defer ln.Close()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	a := newPanelApp(t, "127.0.0.1", "")
+	err = a.SetListen("127.0.0.1", port)
+	if err == nil {
+		t.Fatal("端口被占用时应返回错误")
+	}
+	// 原文随平台变化（Unix: "address already in use"；Windows: "Only one usage..."），
+	// 只断言底层 net.Listen 的错误被原样带出，避免平台相关匹配造成假红。
+	if !strings.Contains(err.Error(), "listen tcp") {
+		t.Fatalf("错误里应保留底层 net.Listen 原文，实际：%v", err)
+	}
+	if !strings.Contains(err.Error(), "占用") {
+		t.Fatalf("错误里应带中文可操作提示，实际：%v", err)
 	}
 }
 
