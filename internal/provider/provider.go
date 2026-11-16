@@ -153,6 +153,16 @@ func (m ModelInfo) Modality() string {
 	return "text->text"
 }
 
+// RouteHit 是自动选渠的一个候选：某渠道具备某个模型，并附带其倍率信息。
+//
+// 与 ModelPricing 的区别：ModelPricing 是上游返回的定价记录，可能没有对应模型；
+// RouteHit 一定是「该渠道当前模型列表里存在该模型」的可路由候选。
+type RouteHit struct {
+	Channel  string
+	Rate     float64
+	Explicit bool // false = 上游未返回该模型倍率，Rate 无意义（未知，不是免费）
+}
+
 // ModelPricing 模型积分定价（从上游 API 拉取）。
 type ModelPricing struct {
 	Model   string  `json:"model"`
@@ -171,6 +181,21 @@ type ModelPricing struct {
 // IsExplicit 报告该定价是否来自上游显式倍率字段（未设置时按 true 处理）。
 func (p ModelPricing) IsExplicit() bool {
 	return p.Explicit == nil || *p.Explicit
+}
+
+// ChannelHealth 面板展示用：单渠道「模型列表 + 费率」的拉取健康度（非空 = 数据新鲜）。
+type ChannelHealth struct {
+	// Source 当前模型列表来源：live = 上游接口拉取，static = 渠道无接口，静回流静态兜底表，
+	// 从未拉到 = ""。
+	Source string `json:"source"`
+	// UpdatedAt 最后成功拉取时间（"01-02 15:04"，不含秒，方便短窗显示）。
+	UpdatedAt string `json:"updated_at"`
+	// ModelCount 当前渠道的模型数。
+	ModelCount int `json:"model_count"`
+	// Stale 模型列表是否已过时（超过 2h 未更新）。
+	Stale bool `json:"stale"`
+	// Error 最近一次拉取失败的原因（非空 = 不健康，面板应收捡提示）。
+	Error string `json:"error,omitempty"`
 }
 
 // Upstream 是 server/scheduler 依赖的最小上游能力集合。

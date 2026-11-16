@@ -160,7 +160,7 @@ async function refreshFees() {
   }
 }
 
-// ---- 一键添加自定义模型（写入 WorkBuddy 的 models.json）----
+// ---- 写入 WorkBuddy 客户端模型清单（写入 ~/.workbuddy/models.json）----
 //
 // 写入是**整体覆盖**用户的自定义清单，故必须先预览（拿真实的「会覆盖多少条」），
 // 再由用户确认；后端也要求显式 confirm=true 才落盘。
@@ -701,6 +701,25 @@ function renderFees(fees) {
   renderFees.lastData = fees;
   const box = $("feesBox");
   const channels = fees.channels || [];
+  // 渠道健康度（面板徽标用）：key 为渠道名，value 为 {source/updated_at/model_count/stale/error}。
+  const HEALTH = fees.health || {};
+  // 渠道健康度微标：绿（上游刚拉过）/ 黄（>2h 未更新）/ 红（有错误）/ 灰（静流兜底表）。
+  // 仅用于提醒用户「这 tab 的数据是否在更新」，不参与路由与定价，不引入综合评分。
+  const healthBadge = (ch, health) => {
+    const h = health[ch];
+    if (!h) return "";
+    let cls = "gray", lbl = "静流兜底";
+    if (h.error) { cls = "bad"; lbl = `错误`; }
+    else if (h.stale) { cls = "stale"; lbl = "超时"; }
+    else if (h.source) { cls = "ok"; lbl = "已更新"; }
+    const tip = [
+      `来源 ${h.source || "静流"}`,
+      `更新 ${h.updated_at || "未知"}`,
+      `模型/费率数 ${h.model_count}`,
+      h.error ? `原因: ${h.error}` : null,
+    ].filter(Boolean).join(" · ");
+    return { cls, lbl, title: tip };
+  };
   // 「显示隐藏模型」开关状态要反映到按钮上：每次重渲染都同步（切 tab、搜索都会走到这里），
   // 否则开关在重新拉数据后会视觉回退成未按下，与实际筛选状态不一致。
   syncShowAllBtn();
@@ -841,8 +860,12 @@ function renderFees(fees) {
     const bal = channelCredits(ch.channel);
     const balHtml = bal === null ? ""
       : `<span class="fees-tab-bal" title="该渠道全部账号当前可用积分合计">余额 ${fmtNum(bal)} 分</span>`;
+    // 渠道健康度微标（使用已暴露的 health 数据，不含综合评分）：
+    // 绿 = 上游刚拉过，黄 = 超 2h 未更新，红 = 有错误，灰 = 静流兜底表，
+    // 仅用于提醒用户「这 tab 的数据是否在更新」，不参与路由与定价。
+    const hb = healthBadge(ch.channel, HEALTH);
     html += `<button class="fees-tab${on}" data-feech="${esc(ch.channel)}"
-      title="${esc(chLabel(ch.channel))}">${esc(chLabel(ch.channel))}<span class="fees-tab-n">${n}</span>${balHtml}</button>`;
+      title="${esc(chLabel(ch.channel))}${hb ? "\n" + esc(hb.title) : ""}">${esc(chLabel(ch.channel))}<span class="fees-tab-n">${n}</span>${balHtml}${hb ? `<span class="fees-tab-health ${hb.cls}" title="${esc(hb.title)}">${hb.lbl}</span>` : ""}</button>`;
   }
   html += `</div>`;
 
@@ -1836,8 +1859,11 @@ function openSettings() {
   // 模型路由
   const cc = state.compat || {};
   const channels = cc.channels || [];
-  $("selCh").innerHTML = channels.map(c => `<option value="${c}">${c}</option>`).join("");
-  $("selCh").value = cc.default_channel || (channels[0] || "");
+  const autoOpt = `<option value="auto">自动（按模型匹配渠道，免费/低费率优先）</option>`;
+  $("selCh").innerHTML = autoOpt + channels.map(c => `<option value="${c}">${c}</option>`).join("");
+  const curDefault = cc.default_channel || (channels[0] || "auto");
+  $("selCh").value = curDefault;
+  if ($("selCh").value !== curDefault) $("selCh").value = "auto";
   $("inMaxTok").value = cc.max_tokens_cap || 0;
   const map = cc.model_map || {};
   const entries = Object.entries(map);
@@ -1846,7 +1872,15 @@ function openSettings() {
   $("mapText").value = entries.map(([k,v]) => `${k} = ${v}`).join("\n");
   $("mapEditor").classList.add("hidden");
   $("mapErr").textContent = "";
+  // 多候选编辑器：随对话框打开而重置为当前值，收起
+  const multi = cc.custom_models || {};
+  const multiEntries = Object.entries(multi);
+  $("multiSummary").textContent = multiEntries.length === 0 ? "（空）" : multiEntries.map(([k,v]) => `${k} = ${v.join(",")}`).join(" \u00A0 \u00A0");
+  $("multiMapText").value = multiEntries.map(([k,v]) => `${k} = ${v.join(",")}`).join("\n");
+  $("multiMapEditor").classList.add("hidden");
+  $("multiErr").textContent = "";
   renderMapPresets(channels);
+  renderAliasForm(channels);
   // 渠道代理
   renderProxyList();
   // 自动签到 + 开机自启 + 临期阈值
@@ -1942,10 +1976,22 @@ async function saveSettings() {
     if (err) { $("mapErr").textContent = err; toast(err); return; }
     modelMap = parsed;
   }
+  // 多候选：优先读编辑器；编辑器从未展开过则用原值（保证「只改监听/渠道不碰多候选」）
+  let customModels = state.compat?.custom_models || {};
+  if (!$("multiMapEditor").classList.contains("hidden")) {
+    const [parsed, err] = parseMultiMapText($("multiMapText").value);
+    if (err) { $("multiErr").textContent = err; toast(err); return; }
+    customModels = parsed;
+  }
   const defaultChannel = $("selCh").value;
   const maxTokensCap = parseInt($("inMaxTok").value, 10) || 0;
   try {
-    await api("/api/config/compat", { default_channel: defaultChannel, max_tokens_cap: maxTokensCap, model_map: modelMap });
+    await api("/api/config/compat", {
+      default_channel: defaultChannel,
+      max_tokens_cap: maxTokensCap,
+      model_map: modelMap,
+      custom_models: customModels,
+    });
   } catch (e) { toast(e.message); return; }
 
   // 4) 临期阈值（1/2/3 天，独立端点即时生效）
@@ -2027,6 +2073,58 @@ async function saveRename() {
   } catch (e) { toast(e.message); }
 }
 
+// ---------- 自定义模型 / 别名（model_map 的引导式入口） ----------
+//
+// 规则与 parseMapText 完全一致：别名固定映射到「渠道/模型」。
+// 这里不发明新配置结构，直接生成一行 mapText，最终仍走 model_map 保存，
+// 保证 UI 表单、文本编辑器、config.json 三者规则永不漂移。
+
+// renderAliasForm 初始化「添加别名」表单：渠道下拉 + 模型 datalist。
+function renderAliasForm(channels) {
+  const sel = $("aliasChannel");
+  if (!sel) return;
+  const bound = new Set((state.accounts || []).map(a => a.group));
+  if (bound.has("traework")) bound.add("traecode");
+  const usable = channels.filter(c => bound.has(c));
+  const list = usable.length ? usable : channels;
+  sel.innerHTML = list.map(c => `<option value="${c}">${c}</option>`).join("");
+
+  const dl = $("aliasModelList");
+  if (!dl) return;
+  // 用当前缓存的费率/模型清单喂 datalist：让用户点选真实存在的模型，而非凭记忆敲。
+  const rows = [];
+  for (const ch of (state.fees?.channels || [])) {
+    if (list.length && !list.includes(ch.channel)) continue;
+    for (const m of (ch.models || [])) {
+      rows.push(`<option value="${esc(m.model)}">${esc(ch.channel)} · ${m.priced ? `倍率 ${m.rate}` : "费率未知"}</option>`);
+    }
+  }
+  dl.innerHTML = rows.slice(0, 400).join("");
+}
+
+// addAliasFromForm 把引导式表单内容追加进 mapText，并展开编辑器让用户核对后保存。
+function addAliasFromForm() {
+  const name = ($("aliasName")?.value || "").trim();
+  const ch = ($("aliasChannel")?.value || "").trim();
+  const model = ($("aliasModel")?.value || "").trim();
+  if (!name) { toast("请填写客户端模型名（别名）"); return; }
+  if (!ch) { toast("请选择目标渠道"); return; }
+  if (!model) { toast("请填写目标模型名"); return; }
+  const line = `${name} = ${ch}/${model}`;
+
+  $("mapEditor").classList.remove("hidden");
+  const cur = $("mapText").value.split(/\r?\n/);
+  const have = new Set(cur.map(l => l.split("=")[0].trim()).filter(Boolean));
+  if (have.has(name)) {
+    toast(`别名「${name}」已存在，请先在映射表中删除或修改它`);
+    return;
+  }
+  $("mapText").value = cur.filter(Boolean).concat(line).join("\n");
+  $("aliasName").value = "";
+  $("aliasModel").value = "";
+  toast("已加入映射表，确认无误后点「保存设置」生效");
+}
+
 // ---------- 模型映射编辑器 ----------
 
 // CHANNEL_PRESETS 各渠道的缺省建议映射（模型为该渠道常用/免费模型）。
@@ -2095,6 +2193,72 @@ function parseMapText(raw) {
     map[k] = v;
   }
   return [map, ""];
+}
+
+// ---------- 多候选自定义模型（custom_models） ----------
+//
+// 与 parseMapText 完全一致：别名 + `渠道/模型` 阵列，解析后走 `custom_models` 保存，
+// 网卡侧（网关）按免费/低费率优先排序，额度用尽（429/6004）时自动切号。
+
+// parseMultiMapText 校验多候选表编辑器内容，返回 (customModels, 错误信息)。
+// 每行一个别名 = 候选阵列（逗号 / 换行分隔，全部 `渠道/模型` 形式）。
+function parseMultiMapText(raw) {
+  const cm = {};
+  const channels = new Set(state.compat?.channels || []);
+  for (const line0 of raw.split(/\r?\n/)) {
+    const line = line0.trim();
+    if (!line || line.startsWith("#")) continue;
+    const idx = line.indexOf("=");
+    if (idx < 0) return [null, `格式错误（缺少 =）：${line}`];
+    const k = line.substring(0, idx).trim(), v = line.substring(idx + 1).trim();
+    if (!k || !v) return [null, `格式错误（键或值为空）：${line}`];
+    const list = v.split(/[,，\n\r\t]/)
+      .map(x => x.trim())
+      .filter(x => x !== "");
+    if (!list.length) return [null, `别名 ${k} 没有候选项`];
+    for (const item of list) {
+      const vi = item.indexOf("/");
+      if (vi <= 0 || !item.substring(vi + 1).trim()) return [null, `候选项必须是「渠道/模型」形式：${item}`];
+      const ch = item.substring(0, vi);
+      if (channels.size && !channels.has(ch)) return [null, `未知渠道「${ch}」；已知渠道：${[...channels].join(", ")}`];
+    }
+    if (cm[k] !== undefined) return [null, `重复的键：${k}`];
+    cm[k] = list;
+  }
+  return [cm, ""];
+}
+
+// toggleMultiMapEditor 展开/收起多候选编辑器。
+function toggleMultiMapEditor() {
+  $("multiMapEditor").classList.toggle("hidden");
+}
+
+// addMultiAliasFromForm 把引导式表单内容追加进 multiMapText，并展开编辑器让用户核对后保存。
+function addMultiAliasFromForm() {
+  const name = ($("multiAliasName")?.value || "").trim();
+  if (!name) { toast("请填写客户端模型名（别名）"); return; }
+  const raw = ($("multiCandidates")?.value || "").trim();
+  if (!raw) { toast("请填写候选阵列"); return; }
+  const list = raw.split(/[,，\n\r\t]/).map(x => x.trim()).filter(x => x !== "");
+  for (const item of list) {
+    if (item.indexOf("/") <= 0 || !item.substring(item.indexOf("/") + 1).trim()) {
+      toast(`候选项 ${item} 必须是「渠道/模型」形式`);
+      return;
+    }
+  }
+  const line = `${name} = ${list.join(",")}`;
+
+  $("multiMapEditor").classList.remove("hidden");
+  const cur = $("multiMapText").value.split(/\r?\n/);
+  const have = new Set(cur.map(l => l.split("=")[0].trim()).filter(Boolean));
+  if (have.has(name)) {
+    toast(`别名「${name}」已存在，请先在映射表中删除或修改它`);
+    return;
+  }
+  $("multiMapText").value = cur.filter(Boolean).concat(line).join("\n");
+  $("multiAliasName").value = "";
+  $("multiCandidates").value = "";
+  toast("已加入多候选表，确认无误后点「保存设置」生效");
 }
 
 // ---------- 复制到剪贴板 ----------
@@ -2202,6 +2366,12 @@ function bind() {
   $("btnSettingsSave").onclick = saveSettings;
   $("btnSettingsCancel").onclick = closeSettings;
   $("btnCompatMap").onclick = toggleMapEditor;
+  $("btnAddAlias").onclick = addAliasFromForm;
+  $("btnCompatMulti").onclick = toggleMultiMapEditor;
+  $("btnAddMulti").onclick = addMultiAliasFromForm;
+  // 别名/候选名回车快捷添加；文本域不绑回车（避免重复提交保存）
+  $("aliasName").onkeydown = (e) => { if (e.key === "Enter") addAliasFromForm(); };
+  $("multiAliasName").onkeydown = (e) => { if (e.key === "Enter") addMultiAliasFromForm(); };
   $("selHost").onchange = () => {
     $("customHostRow").classList.toggle("hidden", $("selHost").value !== "__custom__");
     syncListenRisk(); // 监听地址变化 → 实时间同步警告条与必填星号

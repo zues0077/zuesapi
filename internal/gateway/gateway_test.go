@@ -92,7 +92,7 @@ func TestPipeStatusHandshake(t *testing.T) {
 	inner := &scriptedHandler{}
 	g := New(Config{Inner: inner, APIKey: "secret", Router: Router{Default: "workbuddy", Channels: []string{"workbuddy"}}})
 	res, err := g.call(t.Context(), "/v1/chat/completions",
-		[]byte(`{"model":"workbuddy/x","stream":false}`), "secret")
+		[]byte(`{"model":"workbuddy/x","stream":false}`), "secret", nil)
 	if err != nil {
 		t.Fatalf("call: %v", err)
 	}
@@ -113,7 +113,7 @@ func TestPipeStatusHandshake(t *testing.T) {
 func TestPipeErrorStatus(t *testing.T) {
 	g := New(Config{Inner: &scriptedHandler{}, Router: Router{Default: "workbuddy"}})
 	res, err := g.call(t.Context(), "/v1/chat/completions",
-		[]byte(`{"model":"workbuddy/x","x-status":429}`), "")
+		[]byte(`{"model":"workbuddy/x","x-status":429}`), "", nil)
 	if err != nil {
 		t.Fatalf("call: %v", err)
 	}
@@ -129,7 +129,7 @@ func TestPipeErrorStatus(t *testing.T) {
 // TestPipeFlushStreaming 流式：多次 Write 必须逐次可读（不被缓冲成一次）。
 func TestPipeFlushStreaming(t *testing.T) {
 	g := New(Config{Inner: &scriptedHandler{}, Router: Router{Default: "workbuddy"}})
-	res, err := g.call(t.Context(), "/v1/chat/completions", []byte(`{"model":"workbuddy/x","stream":true}`), "")
+	res, err := g.call(t.Context(), "/v1/chat/completions", []byte(`{"model":"workbuddy/x","stream":true}`), "", nil)
 	if err != nil {
 		t.Fatalf("call: %v", err)
 	}
@@ -160,7 +160,7 @@ func TestPipeClientDisconnectCancels(t *testing.T) {
 	g := New(Config{Inner: inner, Router: Router{Default: "workbuddy"}})
 
 	ctx, cancel := context.WithCancel(context.Background())
-	res, err := g.call(ctx, "/v1/chat/completions", []byte(`{}`), "")
+	res, err := g.call(ctx, "/v1/chat/completions", []byte(`{}`), "", nil)
 	if err != nil {
 		t.Fatalf("call: %v", err)
 	}

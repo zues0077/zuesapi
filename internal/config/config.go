@@ -225,6 +225,11 @@ type Config struct {
 		DefaultChannel string `json:"default_channel"`
 		// ModelMap 裸模型名 → "channel/model"。key 以 * 结尾时按前缀通配匹配。
 		ModelMap map[string]string `json:"model_map"`
+		// CustomModels 裸模型名 → 候选 "channel/model" 阵列（如 workbuddy/glm-5.2）。
+		//
+		// 用来描述「一个虚拟模型名可以走哪些模型」：请求先匹配界面上
+		// 用户勾选的候选列表（按免费/低费率排好序），哪个额度用尽就切下一个。
+		CustomModels map[string][]string `json:"custom_models"`
 		// MaxTokensCap 转发上游前对 max_tokens 封顶（0 = 不限制）。
 		// Anthropic 客户端常发 64000，而多数上游上限更低，导致直接 400。
 		MaxTokensCap int `json:"max_tokens_cap"`
@@ -234,6 +239,12 @@ type Config struct {
 	// qodercom/workbuddyai/qwenwork），value 为代理 URL（http/https/socks5）。
 	// 空串或未列出的渠道直连。主要用途：给有区域限制的渠道走代理。
 	Proxies map[string]string `json:"proxies,omitempty"`
+
+	// RefreshIntervalMinutes 面板「模型列表和费率」的后台自动刷新间隔（分钟）。
+	// 模型列表与费率都随上游变动，且面板依赖它们展示，故每 N 分钟统一拉一篇。
+	// 0 = 默认 30 分钟；Normalize 钳制到 5～1440（5 分钟以下会打爆上游，
+	// 24 小时以上用户按 anest 环境用旧缓存看）。
+	RefreshIntervalMinutes int `json:"refresh_interval_minutes"`
 
 	// 解析后
 	HardCreditDur  time.Duration `json:"-"`
@@ -480,6 +491,12 @@ func applyEnv(c *Config) {
 			c.Compat.MaxTokensCap = n
 		}
 	}
+	// WILDWORK_REFRESH_INTERVAL_MINUTES 覆盖后台「模型列表 + 费率」自动刷新间隔。
+	if v := os.Getenv("WILDWORK_REFRESH_INTERVAL_MINUTES"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.RefreshIntervalMinutes = n
+		}
+	}
 }
 
 // NormalizePublicURL 清洗并校验「外网访问地址」，返回去掉首尾空白与末尾 / 的结果。
@@ -638,6 +655,17 @@ func (c *Config) normalize() error {
 	}
 	c.SessionStickyTTLDur = time.Duration(c.SessionStickyTTL) * time.Minute
 	c.SessionStickyGCDur = time.Duration(c.SessionStickyGC) * time.Minute
+	// 模型列表 + 费率 的后台刷新间隔：0 / 负数 → 默认 30 分钟；
+	// 低于 5 分钟会打爆上游的模型/费率接口，超过 24 小时用户只能用旧缓存看面板。
+	if c.RefreshIntervalMinutes <= 0 {
+		c.RefreshIntervalMinutes = 30
+	}
+	if c.RefreshIntervalMinutes < 5 {
+		c.RefreshIntervalMinutes = 5
+	}
+	if c.RefreshIntervalMinutes > 1440 {
+		c.RefreshIntervalMinutes = 1440
+	}
 	// 兼容旧版 checkin_hours；新版本统一规范化为 HH:MM。
 	if len(c.Schedule.CheckinTimes) == 0 {
 		c.Schedule.CheckinTimes = make([]string, 0, len(c.Schedule.CheckinHours))

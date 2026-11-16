@@ -48,6 +48,12 @@ const BROWSER = process.env.PANEL_BROWSER ||
   await page.waitForTimeout(600);
 
   const info = await page.evaluate(() => ({
+    feesBox: !!document.querySelector('#feesBox'),
+    // 渠道健康度微标（灰/蓝/黄/红）：不允许出现未定义的 class（由 .fees-tab-health 的
+    // ok/stale/bad/gray 四色约束，新增 class 可能导致隐藏 bug 不显示徽标）。
+    healthBadges: document.querySelectorAll('.fees-tab-health').length,
+    healthClasses: [...document.querySelectorAll('.fees-tab-health')].map(e => e.className)
+      .join(' '),
     stateLoaded: (typeof state !== 'undefined' && state !== null),
     accounts: (typeof state !== 'undefined' && state) ? (state.accounts || []).length : -1,
     growthSupported: (typeof state !== 'undefined' && state) ? state.growth_supported : 'n/a',
@@ -77,6 +83,13 @@ const BROWSER = process.env.PANEL_BROWSER ||
       return el ? el.dataset.mid : '(全部带倍率)';
     })(),
     exportBtnBound: !!document.getElementById('btnExportModels').onclick,
+    // 「自定义模型 / 别名」引导式表单：openSettings() 里 renderAliasForm 必须
+    // 填好渠道下拉与模型 datalist，addAliasFromForm 必须绑上点击。
+    aliasChannelOptions: document.getElementById('aliasChannel')
+      ? document.getElementById('aliasChannel').options.length : 'missing',
+    aliasModelList: document.getElementById('aliasModelList')
+      ? document.getElementById('aliasModelList').options.length : 'missing',
+    aliasBtnBound: !!document.getElementById('btnAddAlias').onclick,
   }));
 
   await browser.close();
@@ -108,7 +121,22 @@ const BROWSER = process.env.PANEL_BROWSER ||
   if (info.copySample === 'missing' || !/\(\d+\.\d+x\)$/.test(info.copySample)) {
     bad.push('费率表复制内容未带倍率后缀，实际：' + info.copySample);
   }
-  if (!info.exportBtnBound) bad.push('「一键添加自定义」按钮未绑定');
+  if (info.feesBox === false) bad.push('费率表未渲染（/api/fees 可能失败）');
+  if (info.healthBadges === 0) bad.push('费率表渠道徽标数为 0（health 数据未下发或渲染未补徽标）');
+  if (info.feesBox === true) {
+    // 徽标必须属于 4 色之一（ok/stale/bad/gray），非法 class 意味着徽标没走 .fees-tab-health，
+    // 面板上看不到徽标会让人觉得问题出在 "health 数据未下发"。
+    const cls = info.healthClasses || '';
+    for (const c of cls.split(' ')) {
+      if (c.startsWith('fees-tab-health') && !['ok', 'stale', 'bad', 'gray'].includes(c.replace('fees-tab-health ', ''))) {
+        bad.push('非法微标 class：' + c);
+      }
+    }
+  }
+  if (info.aliasBtnBound === false) bad.push('「添加别名」按钮未绑定');
+  if (info.aliasChannelOptions === 'missing' || info.aliasChannelOptions === 0) {
+    bad.push('「添加别名」渠道下拉为空（renderAliasForm 未跑或 channels 为空）：' + info.aliasChannelOptions);
+  }
 
   if (bad.length) {
     console.log('\n❌ 失败：' + bad.join('；'));

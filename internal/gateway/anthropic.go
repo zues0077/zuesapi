@@ -40,7 +40,7 @@ func (g *Gateway) anthropicMessages(w http.ResponseWriter, r *http.Request, body
 	}
 	stream := asBool(body["stream"])
 
-	res, err := g.callChat(w, r, req, stream)
+	res, err := g.callChat(w, r, req, stream, g.candidatesFromBody(model))
 	if err != nil {
 		writeAnthropicError(w, http.StatusBadGateway, "api_error", err.Error())
 		return

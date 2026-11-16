@@ -52,7 +52,7 @@ func (g *Gateway) handleResponses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	res, err := g.callChat(w, r, req, stream)
+	res, err := g.callChat(w, r, req, stream, g.candidatesFromBody(model))
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadGateway, "upstream_unavailable", err.Error())
 		return

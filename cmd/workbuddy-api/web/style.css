@@ -364,6 +364,36 @@ body {
   line-height: 15px;
   font-variant-numeric: tabular-nums;
 }
+/* 渠道健康度微标：绿（上游刚拉过）/ 黄（>2h 未更新）/ 红（有错误）/ 灰（静流兜底表） */
+.fees-tab .fees-tab-health {
+  font-size: 10px;
+  border-radius: 999px;
+  padding: 0 7px;
+  line-height: 16px;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+}
+.fees-tab .fees-tab-health.ok {
+  color: #15803d;
+  background: #dcfce7;
+  border: 1px solid #bbf7d0;
+}
+.fees-tab .fees-tab-health.stale {
+  color: #b45309;
+  background: #fef3c7;
+  border: 1px solid #fde68a;
+}
+.fees-tab .fees-tab-health.bad {
+  color: #dc2626;
+  background: #fee2e2;
+  border: 1px solid #fecaca;
+}
+.fees-tab .fees-tab-health.gray {
+  color: var(--muted);
+  background: var(--border);
+  border: 1px solid var(--border);
+}
 /* 模型名可点击复制（整段 code 作为按钮） */
 .fees code.fee-model-copy {
   cursor: pointer;

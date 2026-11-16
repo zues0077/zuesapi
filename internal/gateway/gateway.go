@@ -47,7 +47,8 @@ type Gateway struct {
 	router       Router
 	maxTokensCap int
 	sysone       SystemOneHandler // 非 nil 时注册 POST /v1/systemone
-	mu           sync.RWMutex     // 保护 router/maxTokensCap 热更新
+	lookup       RouteLookup      // 自动选渠查询器；拷贝进 router，SetCompat 时保留
+	mu           sync.RWMutex     // 保护 router/maxTokensCap/lookup 热更新
 }
 
 // New 构造兼容层。inner 为 nil 时返回 nil（调用方据此跳过兼容层，保持旧行为）。
@@ -85,18 +86,33 @@ func (g *Gateway) withRouter(fn func(rt *Router)) {
 	fn(&g.router)
 }
 
-// SetCompat 热更新路由配置（default_channel / max_tokens_cap / model_map）。
+// SetLookup 注入自动选渠查询器（default_channel == "auto" 时用）。
+// 通常在 main 装配时注入一次；面板热改 compat 不会被 SetCompat 清掉。
+func (g *Gateway) SetLookup(fn RouteLookup) {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	g.lookup = fn
+	g.router.Lookup = fn
+	g.mu.Unlock()
+}
+
+// SetCompat 热更新路由配置（default_channel / max_tokens_cap / model_map / custom_models）。
 // 面板保存 compat 时调用；不刷新的话新映射要到下次重启才生效。
 // channels 用于校验映射目标的渠道前缀，调用方应传入当前已接入渠道。
-func (g *Gateway) SetCompat(defaultChannel string, maxTokensCap int, modelMap map[string]string, channels []string) {
+func (g *Gateway) SetCompat(defaultChannel string, maxTokensCap int, modelMap map[string]string,
+	customModels map[string][]string, channels []string) {
 	if g == nil {
 		return
 	}
 	g.mu.Lock()
 	g.router = Router{
-		Default:  defaultChannel,
-		Map:      modelMap,
-		Channels: SortChannels(channels),
+		Default:      defaultChannel,
+		Map:          modelMap,
+		CustomModels: customModels,
+		Channels:     SortChannels(channels),
+		Lookup:       g.lookup,
 	}
 	g.maxTokensCap = maxTokensCap
 	g.mu.Unlock()
@@ -154,6 +170,18 @@ func (g *Gateway) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// candidatesFromBody 当 model 为「多候选虚拟别名」时，返回候选阵列（按开源/低费率排序）；
+// 不是 alias 时返回 nil（普通路由模型，内层不做切号）。
+func (g *Gateway) candidatesFromBody(model string) []string {
+	var cands []string
+	g.withRouter(func(rt *Router) {
+		if rt.isCustomAlias(model) {
+			cands = rt.CustomModels[model]
+		}
+	})
+	return cands
+}
+
 // ---------------------------------------------------------------------------
 // 共用工具
 // ---------------------------------------------------------------------------
@@ -164,12 +192,17 @@ func (g *Gateway) withAuth(next http.HandlerFunc) http.HandlerFunc {
 type chatRequest = map[string]any
 
 // callChat 把 Chat 请求投递给内层，返回其响应（流式 raw body / 非流式已解析）。
-func (g *Gateway) callChat(w http.ResponseWriter, r *http.Request, req chatRequest, stream bool) (*innerResult, error) {
+//
+// candidates 为「多候选虚拟别名」的候选实体阵列（不含请求体里已经写入的第一候选），
+// 形如 ["my-cheap-code", "workbuddy/glm-5.2", "qodercn/glm-5.2"]；为空时不注入请求头，
+// 内层不感知本轮选号（普通模式）。
+func (g *Gateway) callChat(w http.ResponseWriter, r *http.Request, req chatRequest, stream bool,
+	candidates []string) (*innerResult, error) {
 	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, err
 	}
-	return g.call(r.Context(), "/v1/chat/completions", body, g.key())
+	return g.call(r.Context(), "/v1/chat/completions", body, g.key(), candidates)
 }
 
 // readChatResponse 读取内层非流式响应，返回 (状态码, 原始 body)。

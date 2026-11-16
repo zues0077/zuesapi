@@ -8,17 +8,27 @@ package gateway
 
 import (
 	"fmt"
+	"log"
 	"sort"
 	"strings"
 
 	"workbuddy-api/internal/provider"
 )
 
+// RouteLookup 查询某个裸模型名在哪些渠道可用，并给出倍率。
+// 返回顺序不作要求，Router 会按「免费/低费率优先」稳定排序。
+type RouteLookup func(model string) []provider.RouteHit
+
 // Router 模型名解析规则。零值 Router 仅接受带前缀的模型名。
 type Router struct {
-	Default  string            // 兜底渠道，如 "workbuddy"
+	Default  string            // 兜底渠道，如 "workbuddy"；"auto" = 按模型在所有渠道中自动选
 	Map      map[string]string // 裸名 → "channel/model"
-	Channels []string          // 已知渠道（校验前缀 + 报错提示）
+	// CustomModels 虚拟模型名 → 候选 "channel/model" 阵列（如 workbuddy/glm-5.2）。
+	// 顺序由 app 层做免费/低费率排序；这里只负责解释为第一个候选并做渠道合法性过滤。
+	// 请求时命中前缀 > map 精确 > map 通配 > custom，都不匹配才走 auto / default。
+	CustomModels map[string][]string
+	Channels     []string          // 已知渠道（校验前缀 + 报错提示）
+	Lookup       RouteLookup       // Default == "auto" 时用于查询候选渠道；nil 时 auto 视为无候选
 }
 
 // Resolve 解析模型名，返回 "channel/model"。返回的 model 值可能带前缀，调用方勿再重复拼接。
@@ -65,6 +75,58 @@ func (rt *Router) Resolve(model string) (string, error) {
 	if wildcard := rt.longestWildcardKey(m); wildcard != "" {
 		target, err := rt.resolveMapped(m, strings.TrimSpace(rt.Map[wildcard]))
 		return target + suffix, err
+	}
+
+	// custom_models 候选：虚拟别名被展开为候选阵列后，取排序最靠前的那个候选。
+	// 候选在 app 层已按免费/低费率排序、并剔除了 "channel/model" 格式不合法的项；
+	// 这里只再做一次渠道清理（未接入的渠道不能路由），未接入候选全部失效时返回错误。
+	if rt.isCustomAlias(m) {
+		candidates := append([]string(nil), rt.CustomModels[m]...)
+		filtered := make([]string, 0, len(candidates))
+		for _, cand := range candidates {
+			if target, err := rt.resolveMapped(m, cand); err == nil {
+				filtered = append(filtered, target)
+			} else {
+				log.Printf("custom_models[%q] 排除 %q: %v", m, cand, err)
+			}
+		}
+		if len(filtered) == 0 {
+			return "", fmt.Errorf("custom_models[%q] 无可用候选（未接入渠道或格式错误）", m)
+		}
+		return filtered[0] + suffix, nil
+	}
+
+	// 自动选渠：Default == "auto" 时不走固定兜底，而是在所有已接入渠道中
+	// 查找同名模型，按「免费/低费率优先」选第一个。
+	if rt.Default == "auto" {
+		if rt.Lookup == nil {
+			return "", fmt.Errorf("model %q: default_channel=\"auto\" 但未注入渠道查询器", model)
+		}
+		hits := append([]provider.RouteHit(nil), rt.Lookup(m)...)
+		// 只保留已知渠道，避免查询器返回未接入渠道导致 downstream runtimeForModel 报
+		// 「provider not configured」。
+		filtered := hits[:0]
+		for _, h := range hits {
+			if rt.isChannel(h.Channel) {
+				filtered = append(filtered, h)
+			}
+		}
+		if len(filtered) == 0 {
+			return "", fmt.Errorf("model %q 在所有已接入渠道中都不存在；可改用显式 channel/%s 或配置 compat.model_map",
+				model, m)
+		}
+		sort.SliceStable(filtered, func(i, j int) bool {
+			a, b := filtered[i], filtered[j]
+			// 已知倍率优先于未知；已知时低费率优先（免费 rate=0 自然第一）。
+			if a.Explicit != b.Explicit {
+				return a.Explicit
+			}
+			if a.Explicit && a.Rate != b.Rate {
+				return a.Rate < b.Rate
+			}
+			return a.Channel < b.Channel
+		})
+		return filtered[0].Channel + "/" + m + suffix, nil
 	}
 
 	// 兜底渠道
@@ -124,6 +186,12 @@ func (rt *Router) isChannel(name string) bool {
 		}
 	}
 	return false
+}
+
+// isCustomAlias 判断裸模型名是否是多候选虚拟别名（即 compat.custom_models 里有记录），
+// 零值 CustomModels 时返回 false，保持向后兼容。
+func (rt *Router) isCustomAlias(model string) bool {
+	return rt.CustomModels != nil && rt.CustomModels[model] != nil
 }
 
 // SortChannels 去重并排序渠道清单（构造 Router 前调用，保证报错信息稳定）。

@@ -124,7 +124,7 @@ type App struct {
 
 	// compatSyncer 面板保存 compat 后同步给外层兼容层（热更新路由表）。
 	// 由 main.go 注入；nil 时仅写配置不热更（下次启动生效）。
-	compatSyncer func(defaultChannel string, maxTokensCap int, modelMap map[string]string)
+	compatSyncer func(defaultChannel string, maxTokensCap int, modelMap map[string]string, customModels map[string][]string)
 
 	// proxySyncer 面板保存 proxies 后重新套各渠道 HTTP client（热更新代理）。
 	// 由 main.go 注入；nil 时仅写配置不热更。
@@ -148,6 +148,12 @@ type App struct {
 	pricingErr     string // 最近一次拉取错误
 	pricingBusy    bool   // 防并发刷新（启动刷新与面板触发可能重叠）
 
+	// pricingHealth 各渠道「模型列表 + 费率」的健康度（面板 UI 展示用）。
+	// 由后台 tick（refreshChannelModels + RefreshPricing）和面板手动刷新共同更新，
+	// 与 pricingCache 同受 pricingMu 保护。
+	// 来源：live（上游动态拉取）/ static（静流兜底表）/ 从未拉到为空。
+	pricingHealth map[provider.Kind]provider.ChannelHealth
+
 	// taskMu 保护 taskRun（成长任务「一键完成」的异步执行状态）。
 	// 任务动辄跑几十秒到几分钟，同步 HTTP 会撞上前端/网关超时，
 	// 故改为「启动即返回 + 轮询进度」（见 tasks.go）。
@@ -164,6 +170,7 @@ func New(opts Options) (*App, error) {
 		handler:  opts.Handler,
 		auth:     newAuthState(),
 	}
+	a.pricingHealth = make(map[provider.Kind]provider.ChannelHealth)
 	a.loginStateFP = filepath.Join(filepath.Dir(opts.Config.StateFile), "login-state.json")
 	a.pricingFP = filepath.Join(filepath.Dir(opts.Config.StateFile), "pricing-cache.json")
 
@@ -1507,6 +1514,12 @@ func (a *App) StartCreditAutoRefresh(ctx context.Context, kinds []provider.Kind,
 // 两者都随上游变动，且面板依赖它们展示，故定期刷新保持新鲜。
 const PricingRefreshInterval = 30 * time.Minute
 
+// PricingRefreshInterval 模型列表与费率的后台自动刷新间隔（从 cfg 取，Normalize 已经把
+// 0 / 负数 / 越界值拍死到 5～1440 分钟，故不需要再兜底旧 const）。
+func (a *App) PricingRefreshInterval() time.Duration {
+	return time.Duration(a.cfg.RefreshIntervalMinutes) * time.Minute
+}
+
 // StartPricingAutoRefresh 后台定期刷新「模型列表 + 费率」。
 // 启动立即刷一次：否则刚启动时费率缓存为空，面板下方全是 unknown，观感不佳。
 // 之后每隔 interval 一次；取消 ctx 即停止。
@@ -1937,7 +1950,10 @@ func (a *App) ServerRunning() bool {
 }
 
 // SetCompat 保存模型名路由配置（compat 段）并写回 config.json。
-func (a *App) SetCompat(defaultChannel string, maxTokensCap int, modelMap map[string]string) error {
+// SetCompat 保存模型名路由配置（default_channel / 封顶 tokens / 别名映射 / 多候选），
+// 并热更新外层兼容层的路由表：不同步的话新映射要重启才生效。
+func (a *App) SetCompat(defaultChannel string, maxTokensCap int, modelMap map[string]string,
+	customModels map[string][]string) error {
 	if modelMap == nil {
 		modelMap = map[string]string{}
 	}
@@ -1949,10 +1965,22 @@ func (a *App) SetCompat(defaultChannel string, maxTokensCap int, modelMap map[st
 			return fmt.Errorf("model_map 值 %q 需为 channel/model 形式", v)
 		}
 	}
+	// 多候选阵列与 model_map 不能共用同一个 key（否则解析顺序会打架）
+	for k := range modelMap {
+		if _, ok := customModels[k]; ok {
+			return fmt.Errorf("model_map 与 custom_models 不能共用别名 %q（保留一套即可）", k)
+		}
+	}
+	// 多候选阵列全部是 "channel/model"，逐项校验并 Router 展示用免费/低费率排序。
+	customModels = a.canonizeCustomModels(customModels)
+	if customModels == nil {
+		customModels = map[string][]string{}
+	}
 	a.mu.Lock()
 	a.cfg.Compat.DefaultChannel = defaultChannel
 	a.cfg.Compat.MaxTokensCap = maxTokensCap
 	a.cfg.Compat.ModelMap = modelMap
+	a.cfg.Compat.CustomModels = customModels
 	err := config.Save(a.cfg, a.cfgPath)
 	a.mu.Unlock()
 	if err != nil {
@@ -1960,15 +1988,85 @@ func (a *App) SetCompat(defaultChannel string, maxTokensCap int, modelMap map[st
 	}
 	// 热更新外层兼容层的路由表：不同步的话新映射要重启才生效。
 	if a.compatSyncer != nil {
-		a.compatSyncer(defaultChannel, maxTokensCap, modelMap)
+		a.compatSyncer(defaultChannel, maxTokensCap, modelMap, customModels)
 	}
-	log.Printf("模型名路由配置已更新：default_channel=%q max_tokens_cap=%d model_map=%d 条",
-		defaultChannel, maxTokensCap, len(modelMap))
+	log.Printf("模型名路由配置已更新：default_channel=%q max_tokens_cap=%d model_map=%d 条 "+
+		"custom_models=%d 条",
+		defaultChannel, maxTokensCap, len(modelMap), len(customModels))
 	return nil
 }
 
+// canonizeCustomModels 把多候选阵列规范化：每项必须是 "channel/model" 格式（两者非空），
+// 并拒掉含有已接入但没有预留的渠道的候选。返回已排序的阵列。
+func (a *App) canonizeCustomModels(customModels map[string][]string) map[string][]string {
+	if len(customModels) == 0 {
+		return customModels
+	}
+	out := make(map[string][]string, len(customModels))
+	for alias, candidates := range customModels {
+		raw := make([]string, 0, len(candidates))
+		for _, c := range candidates {
+			c = strings.TrimSpace(c)
+			if c == "" {
+				continue
+			}
+			if strings.Index(c, "/") <= 0 {
+				log.Printf("custom_models %q 排除 %q（需为 channel/model 形式）", alias, c)
+				continue
+			}
+			raw = append(raw, c)
+		}
+		out[alias] = a.sortCustomCandidates(raw)
+	}
+	return out
+}
+
+// sortCustomCandidates 把单条候选按照「免费/低费率优先」排序（稳定排序）。
+//
+// 免费（rate=0 且显式标记免费）最优先，其次是低倍率，之后是未知费率的候选。
+// 等价的保持原顺序；排序仅用于面板展示和首次请求的优先顺序，
+// 额度用尽时会在代码层切到下一候选。
+func (a *App) sortCustomCandidates(candidates []string) []string {
+	if len(candidates) <= 1 {
+		return candidates
+	}
+	sorted := make([]string, 0, len(candidates))
+	for _, c := range candidates {
+		sorted = append(sorted, c)
+	}
+	sort.SliceStable(sorted, func(i, j int) bool {
+		aRate, aExplicit := rateOfModel(sorted[i], a.ModelRate)
+		bRate, bExplicit := rateOfModel(sorted[j], a.ModelRate)
+		// 显式未定价的放后面（未知费率）
+		if aExplicit != bExplicit {
+			return aExplicit
+		}
+		// 已知倍率按升序（免费 0.00 自然第一）
+		if aExplicit && aRate != bRate {
+			return aRate < bRate
+		}
+		return sorted[i] < sorted[j]
+	})
+	return sorted
+}
+
+// rateOfModel 查询某 "channel/model" 的倍率及是否显式（由 app 注入的 ModelRate 负责读 pricingCache）。
+func rateOfModel(channelModel string, modelRate func(kind provider.Kind, model string) (float64, bool)) (float64, bool) {
+	if i := strings.Index(channelModel, "/"); i > 0 {
+		kind := provider.Kind(channelModel[:i])
+		model := channelModel[i+1:]
+		if rate, explicit := modelRate(kind, model); explicit {
+			return rate, explicit
+		}
+		return 0, false
+	}
+	return 0, false
+}
+
 // SetCompatSyncer 注入 compat 热更新回调（由 main.go 注入，指向 gateway.SetCompat）。
-func (a *App) SetCompatSyncer(fn func(defaultChannel string, maxTokensCap int, modelMap map[string]string)) {
+// 参数多了 customModels：它是自定义多候选（alias → 候选阵列），热更新时会同时下发。
+func (a *App) SetCompatSyncer(fn func(defaultChannel string, maxTokensCap int,
+	modelMap map[string]string, customModels map[string][]string)) {
 	a.compatSyncer = fn
 }
 
@@ -2181,7 +2279,10 @@ type State struct {
 		DefaultChannel string            `json:"default_channel"`
 		MaxTokensCap   int               `json:"max_tokens_cap"`
 		ModelMap       map[string]string `json:"model_map"`
-		Channels       []string          `json:"channels"` // 可用渠道列表（供 UI 下拉）
+		// CustomModels 多候选虚拟模型名（alias → 候选 "channel/model" 阵列），
+		// 由面板「多候选自定义模型」勾选生成。
+		CustomModels map[string][]string `json:"custom_models"`
+		Channels     []string            `json:"channels"` // 可用渠道列表（供 UI 下拉）
 	} `json:"compat"`
 
 	// Proxies 单渠道上游代理（只读，保存走 POST /api/config/proxies）。
@@ -2238,6 +2339,11 @@ func (a *App) GetState() State {
 	st.Compat.ModelMap = a.cfg.Compat.ModelMap
 	if st.Compat.ModelMap == nil {
 		st.Compat.ModelMap = map[string]string{}
+	}
+	// 多候选：展示排序后的候选阵列（save 时后端已按免费/低费率排序；面板回显即此顺序）。
+	st.Compat.CustomModels = a.cfg.Compat.CustomModels
+	if st.Compat.CustomModels == nil {
+		st.Compat.CustomModels = map[string][]string{}
 	}
 	for k := range a.runtimes {
 		st.Compat.Channels = append(st.Compat.Channels, k.String())
@@ -2755,9 +2861,10 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 			DefaultChannel string            `json:"default_channel"`
 			MaxTokensCap   int               `json:"max_tokens_cap"`
 			ModelMap       map[string]string `json:"model_map"`
+			CustomModels   map[string][]string `json:"custom_models"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
-		if err := a.SetCompat(req.DefaultChannel, req.MaxTokensCap, req.ModelMap); err != nil {
+		if err := a.SetCompat(req.DefaultChannel, req.MaxTokensCap, req.ModelMap, req.CustomModels); err != nil {
 			apiError(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -3068,6 +3175,49 @@ func (a *App) ModelRate(kind provider.Kind, model string) (float64, bool) {
 	return 0, false
 }
 
+// ModelRouteHits 查询某个裸模型名在哪些已接入渠道可用，供 default_channel="auto"
+// 的自动选渠使用。只读缓存/静态兜底，不触发上游网络请求，避免把路由决策变成慢路径。
+//
+// 匹配口径与 /v1/models、FeesInfo 保持一致：以各渠道当前生效的模型列表为基准，
+// 逐渠道精确匹配模型 ID。倍率取自 pricingCache；上游未返回倍率时 Explicit=false
+// （未知，不是免费），排序会把它放在已知倍率之后。
+func (a *App) ModelRouteHits(model string) []provider.RouteHit {
+	bare, _ := provider.StripRateSuffix(strings.TrimSpace(model))
+	if bare == "" {
+		return nil
+	}
+	var modelsByKind map[provider.Kind][]provider.ModelInfo
+	if a.handler != nil {
+		modelsByKind = a.handler.CachedChannelModels()
+	}
+	if len(modelsByKind) == 0 {
+		return nil
+	}
+
+	out := make([]provider.RouteHit, 0, len(modelsByKind))
+	for k, infos := range modelsByKind {
+		found := false
+		for _, mi := range infos {
+			if mi.ID == bare {
+				found = true
+				break
+			}
+		}
+		if !found {
+			continue
+		}
+		rate, explicit := a.ModelRate(k, bare)
+		out = append(out, provider.RouteHit{Channel: k.String(), Rate: rate, Explicit: explicit})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Channel != out[j].Channel {
+			return out[i].Channel < out[j].Channel
+		}
+		return out[i].Rate < out[j].Rate
+	})
+	return out
+}
+
 // FeesInfo 返回「模型列表和费率」面板数据。
 // 以各渠道当前生效的模型列表为基准（与 /v1/models 同源），逐行配上费率：
 // 上游未返回倍率的模型标记 priced=false，前端显示 unknown。
@@ -3134,6 +3284,16 @@ func (a *App) FeesInfo() map[string]any {
 	if errMsg != "" {
 		result["error"] = errMsg
 	}
+	// 各渠道「模型列表 + 费率」健康度（面板徽标用，key 为渠道名）：
+	// source=live 绿，updated_at 超 2 小时黄，有 error 红（仅此三色，不引入综合评分）。
+	// 由后台 tick（模型列表拉取 + 费率拉取）与面板手动刷新共同更新。
+	health := make(map[string]provider.ChannelHealth, len(a.pricingHealth))
+	for k, h := range a.pricingHealth {
+		health[k.String()] = h
+	}
+	if len(health) > 0 {
+		result["health"] = health
+	}
 	return result
 }
 
@@ -3163,20 +3323,29 @@ func (a *App) RefreshPricing() {
 
 	allPricing := make([]provider.ModelPricing, 0)
 	var errs []string
+	// 本 tick 各渠道「模型列表 + 费率」的健康度，在 pricingMu 保护下与 pricingHealth 合并。
+	health := make(map[provider.Kind]provider.ChannelHealth, len(a.runtimes))
 
 	for _, rt := range a.runtimes {
 		// 旧 Qoder 渠道已从界面下线：不再自动刷新其模型/费率（也避免无谓的 token refresh 报错日志）
-		if rt == nil || rt.Pool == nil || rt.Upstream == nil || rt.Kind == provider.Qoder || len(rt.Pool.List()) == 0 {
+		if rt == nil || rt.Pool == nil || rt.Upstream == nil || rt.Kind == provider.Qoder {
 			continue
 		}
+		// 池空/没有可用字号：不要假装健康（未登录/凭证过期）
 		acct := rt.Pool.Pick()
 		if acct == nil {
+			health[rt.Kind] = provider.ChannelHealth{
+				Source: "", UpdatedAt: "", ModelCount: 0, Stale: false, Error: "no account available",
+			}
 			continue
 		}
 		// 先确保 token 有效
 		if acct.NeedsRefresh(10 * time.Minute) {
 			if err := rt.Upstream.RefreshToken(acct); err != nil {
 				errs = append(errs, fmt.Sprintf("%s: token refresh failed", rt.Kind))
+				health[rt.Kind] = provider.ChannelHealth{
+					Source: "", UpdatedAt: "", ModelCount: 0, Stale: false, Error: fmt.Sprintf("token refresh failed: %s", shortErr(err)),
+				}
 				continue
 			}
 			// 必须落盘：refresh token 会轮换，不写回则下次启动用的是旧 refresh token，
@@ -3194,10 +3363,18 @@ func (a *App) RefreshPricing() {
 		}
 		if err != nil {
 			errs = append(errs, fmt.Sprintf("%s: %s", rt.Kind, shortErr(err)))
+			// 失败显形：面板差一点又要猜 "channel 为什么整组消失"。
+			health[rt.Kind] = provider.ChannelHealth{
+				Source: "", UpdatedAt: "", ModelCount: 0, Stale: false,
+				Error: fmt.Sprintf("pricing fetch failed: %s", shortErr(err)),
+			}
 			log.Printf("pricing fetch failed platform=%s err=%v", rt.Kind, err)
 			continue
 		}
 		allPricing = append(allPricing, pricing...)
+		health[rt.Kind] = provider.ChannelHealth{
+			Source: "live", UpdatedAt: time.Now().Format("01-02 15:04"), ModelCount: len(pricing), Stale: false,
+		}
 		log.Printf("pricing fetched platform=%s count=%d", rt.Kind, len(pricing))
 	}
 
@@ -3210,13 +3387,34 @@ func (a *App) RefreshPricing() {
 	})
 
 	a.pricingMu.Lock()
-	a.pricingCache = allPricing
 	a.pricingFetched = time.Now()
 	if len(errs) > 0 {
 		a.pricingErr = strings.Join(errs, "; ")
 	} else {
 		a.pricingErr = ""
 	}
+	// 合并模型列表健康度（handler 负责拉取路径：live/static/error）——
+	// 当费率拉取路径没有记录时（无可用账号 / 从未拉取），才参考模型路径的活体判定；
+	// 费率路径已有记录（live success / live error）以费率为准，不加戏。
+	if a.handler != nil {
+		if modelHealth := a.handler.ChannelHealth(); len(modelHealth) > 0 {
+			for k, h := range modelHealth {
+				if _, ok := health[k]; !ok {
+					health[k] = h
+				}
+			}
+		}
+	}
+	// 标记「模型列表/费率是否已 2h 未更新」：故障与静流兜底的来源不参考（源不健康，
+	// 直接显红/显灰，不依赖 Stale 字段）。
+	stale := time.Since(a.pricingFetched) > 2*time.Hour
+	for k, h := range health {
+		if h.Source != "" && h.Error == "" {
+			h.Stale = stale
+		}
+		a.pricingHealth[k] = h
+	}
+	a.pricingCache = allPricing
 	a.pricingMu.Unlock()
 	a.savePricingCache()
 }

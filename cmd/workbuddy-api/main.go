@@ -569,15 +569,19 @@ func main() {
 		Inner:  inner,
 		APIKey: cfg.APIKey,
 		Router: gateway.Router{
-			Default:  cfg.Compat.DefaultChannel,
-			Map:      cfg.Compat.ModelMap,
-			Channels: gateway.SortChannels(channels),
+			Default:      cfg.Compat.DefaultChannel,
+			Map:          cfg.Compat.ModelMap,
+			CustomModels: cfg.Compat.CustomModels,
+			Channels:     gateway.SortChannels(channels),
 		},
 		MaxTokensCap: cfg.Compat.MaxTokensCap,
 	})
+	// default_channel == "auto" 时，按模型在所有已接入渠道中自动选（免费/低费率优先）。
+	compat.SetLookup(appInst.ModelRouteHits)
 	// 面板保存 compat 时热更新兼容层路由表（不然新映射要重启才生效）
-	appInst.SetCompatSyncer(func(defaultChannel string, maxTokensCap int, modelMap map[string]string) {
-		compat.SetCompat(defaultChannel, maxTokensCap, modelMap, channels)
+	appInst.SetCompatSyncer(func(defaultChannel string, maxTokensCap int, modelMap map[string]string,
+		customModels map[string][]string) {
+		compat.SetCompat(defaultChannel, maxTokensCap, modelMap, customModels, channels)
 	})
 	// 面板保存代理配置时热更新各渠道 HTTP client（重建 Transport，无需重启）。
 	// 表必须与启动路径同源 —— 见 proxyClientMap 的注释。
@@ -591,8 +595,10 @@ func main() {
 	compat.Routes(mux) // POST /v1/responses · /v1/messages · /v1/messages/count_tokens · /v1/systemone
 	mux.Handle("/", inner)
 	if compat != nil {
-		log.Printf("三接口兼容层已启用：default_channel=%q max_tokens_cap=%d model_map=%d 条",
-			cfg.Compat.DefaultChannel, cfg.Compat.MaxTokensCap, len(cfg.Compat.ModelMap))
+		log.Printf("三接口兼容层已启用：default_channel=%q max_tokens_cap=%d model_map=%d 条 "+
+			"custom_models=%d 条",
+			cfg.Compat.DefaultChannel, cfg.Compat.MaxTokensCap,
+			len(cfg.Compat.ModelMap), len(cfg.Compat.CustomModels))
 	}
 	// 安全响应头 + 访问日志包在**整个 mux 外层**：兼容层的四个端点由外层
 	// 直接注册，只挂在内层 Handler 上会漏掉它们。
@@ -665,9 +671,9 @@ func main() {
 		provider.Loomy,
 	}, app.CreditRefreshInterval)
 
-	// 启动即刷新「模型列表 + 费率」，之后每 30 分钟。
+	// 启动即刷新「模型列表 + 费率」，之后每 N 分钟（config.refresh_interval_minutes 可配）
 	// 否则刚启动时费率缓存为空，面板下方全是 unknown（需手动点刷新才正常）。
-	appInst.StartPricingAutoRefresh(sctx, app.PricingRefreshInterval)
+	appInst.StartPricingAutoRefresh(sctx, appInst.PricingRefreshInterval())
 
 	// 运行统计喂入器（账号状态差值/粘性路由/今日作废，30s 一轮）：
 	// 进程内直调各数据源，面板「运行统计」tab 即时可用。

@@ -84,7 +84,9 @@ func maxInnerBody() int64 { return server.MaxRequestBody }
 //
 // apiKey 非空时以 `Authorization: Bearer <apiKey>` 形式注入，让内层 withAuth 正常放行；
 // 调用方应确保该 key 已经过校验（或直接来自请求方，由内层自行拒绝）。
-func (g *Gateway) call(parent context.Context, path string, body []byte, apiKey string) (*innerResult, error) {
+// candidates 为候选实体阵列 header 值（"alias|cand1|cand2"）；为空时=null，不做任何注入。
+func (g *Gateway) call(parent context.Context, path string, body []byte, apiKey string,
+	candidates []string) (*innerResult, error) {
 	pr, pw := io.Pipe()
 	ctx, cancel := context.WithCancel(parent)
 	p := newPipeRW(pw)
@@ -102,6 +104,10 @@ func (g *Gateway) call(parent context.Context, path string, body []byte, apiKey 
 	req.RemoteAddr = "127.0.0.1:0" // 内层若记录来源地址，避免空串
 	if apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	if len(candidates) > 0 {
+		// 候选阵列仅作为层间控制标记，不会进入内层尽量给你的 body 或上游的 body。
+		req.Header.Set("X-WorkBuddy-Candidates", candidates[0])
 	}
 
 	go func() {
