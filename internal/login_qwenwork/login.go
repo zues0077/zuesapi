@@ -1,19 +1,23 @@
 // Package login_qwenwork 实现千问办公（IDE 桌面版同款）OAuth 授权码登录：
-// PKCE(S256) + Ory Hydra 授权码流，本机 HTTP 回调收 code 后本地兑换 token。
+// PKCE(S256) + Ory Hydra 授权码流。
 //
 // 链路（逆向自 ref/qwenwork_auth_20260919.saz，见备忘 §9）：
-//  1. Start：生成 PKCE + state，起本机回调 server（随机端口），
-//     返回授权 URL（client_id=qwenwork-desktop-app，redirect_uri=http://127.0.0.1:<port>/callback）。
-//     实测 Hydra 接受本机 http 回调与自造 state（备忘 §9.3 测 1）。
-//  2. 用户在系统浏览器打开授权 URL：
-//     - 浏览器已有千问办公 session → 自动跳转本机回调（QR 都不用扫）
-//     - 未登录 → 浏览器展示 QR/手机号登录页，用户操作后自动跳回
-//  3. 本机回调收 ?code=... → 立即用 code_verifier 兑换 token（Hydra 标准 /oauth2/token，
-//     public client 无 secret），随后关闭回调 server。
-//  4. Poll 兜底：与其它渠道一致的轮询语义（检查回调结果文件），供 app.pollLogin 调用。
+//  1. Start：生成 PKCE + state，返回授权 URL（client_id=qwenwork-desktop-app，
+//     redirect_uri=在 qwenwork 注册的回调地址）。
+//     授权页成功 → 浏览器被重定向到 https://gateway.qwenwork.cn/oauth/callback?code=...
+//  2. 由于程序在 NAS/容器运行，浏览器无法回连 NAS 上的随机端口，所以上游把 code
+//     带回了已注册的 gateway 回调页；用户需要复制链接栏完整地址粘回面板（
+//     SubmitLoginCallback，已验证可工作），程序按与自动回调完全相同的 pending 通道
+//     拿 code 并兑换 token（见 app.login_callback.go 的设计总结）。
+//  3. Poll 兜底：与其它渠道一致的轮询语义（检查回调结果文件 / pending 通道），
+//     供 app.pollLogin 调用。
 //
 // 注意：桌面 IDE 官方 redirect_uri 是 https://gateway.qwenwork.cn/oauth/callback
-// （桌面进程内兑换），本工具改用本机回调自兑——token 等价（同 client_id/scope）。
+// （桌面进程内兑换），QwenWork 容器 | NAS 部署形态下利用同一已注册地址，
+// 代码不指向 127.0.0.1 本机端口。授权端点/Token 端点以官方
+// .well-known/openid-configuration 为准：
+//   authorization_endpoint = https://qwenwork.cn/oauth2/auth
+//   token_endpoint           = https://qwenwork.cn/auth/oauth/token
 package login_qwenwork
 
 import (
@@ -25,7 +29,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -39,10 +42,15 @@ import (
 
 // 上游常量（IDE 桌面版同款）。
 const (
+	// 千问办公 OAuth 端点（官方 .well-known/openid-configuration 实测值）
 	OAuthBase   = "https://qwenwork.cn"
-	TokenURL    = OAuthBase + "/oauth2/token"
+	AuthURL     = OAuthBase + "/oauth2/auth"
+	TokenURL    = OAuthBase + "/auth/oauth/token"
 	ClientID    = "qwenwork-desktop-app"
-	Scope       = "openid profile email offline_access qwen_work"
+	Scope       = "openid offline_access"
+	// 在 qwenwork 注册过的 redirect_uri：授权页能回调回这个地址（URL 由用户手动
+	// 粘回程序，见 SubmitCallback），而不是本地随机端口。
+	CallbackURI = "https://gateway.qwenwork.cn/oauth/callback"
 	callbackTTL = 5 * time.Minute // 本机回调 server 最长等待
 )
 
@@ -60,16 +68,16 @@ type Result struct {
 	IDToken string
 }
 
-// state 落盘的 PKCE 状态（含回调端口，供 Poll 与回调 server 共享）。
+// state 落盘的 PKCE 状态（供 Poll 与 SubmitCallback 共享）。
 type state struct {
 	Verifier     string `json:"verifier"`
 	RedirectURI  string `json:"redirect_uri"`
-	CallbackPort int    `json:"callback_port"`
 	AuthURL      string `json:"auth_url"`
 	CreatedAt    int64  `json:"created_at"`
 }
 
-// pendingCode 回调 server 收到的授权码（内存通道 + 文件双保险）。
+// pendingCode 展示的授权码（内存通道 + 文件双保险）：
+// 手工粘贴（SubmitCallback）与自动回调（若有本机 server 监听时）注入同一条锁。
 type pendingCode struct {
 	mu       sync.Mutex
 	code     string
@@ -78,10 +86,8 @@ type pendingCode struct {
 }
 
 var (
-	pending     = &pendingCode{}
-	callbackSrv *http.Server
-	callbackLn  net.Listener
-	srvOnce     sync.Once
+	// pending 是登录流程唯一的数据通道（自动/手工粘贴共用）。
+	pending = &pendingCode{}
 )
 
 // NewClient 简单 HTTP 客户端（无 cookie 需求；token 兑换用）。
@@ -89,76 +95,44 @@ func NewClient() *http.Client {
 	return &http.Client{Timeout: 30 * time.Second}
 }
 
-// Start 发起登录：生成 PKCE、起本机回调、返回授权 URL。
+// Start 发起登录：生成 PKCE + state，返回授权 URL。
+//
+// 与桌面 IDE 相同：redirect_uri 使用已在 qwenwork 注册的 `https://gateway.qwenwork.cn/oauth/callback`，
+// 而非本机随机端口（NAS/容器部署下浏览器回连不到本地）。授权完成后浏览器会显示
+// `https://gateway.qwenwork.cn/oauth/callback?code=XXXX`（或报错/白屏），用户把地址栏
+// 完整地址粘回面板，由 SubmitCallback → pending 通道 → Poll 继续完成兑换。
 func Start(_ *http.Client, statePath string) (string, error) {
 	verifier, challenge := makePKCE()
 
-	// 本机回调：随机空闲端口
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return "", fmt.Errorf("listen callback: %w", err)
-	}
-	port := ln.Addr().(*net.TCPAddr).Port
-	redirectURI := fmt.Sprintf("http://127.0.0.1:%d/callback", port)
+	redirectURI := CallbackURI
 
-	authURL := fmt.Sprintf("%s/oauth2/auth?client_id=%s&code_challenge=%s&code_challenge_method=S256&redirect_uri=%s&response_type=code&scope=%s&state=%s",
-		OAuthBase, ClientID, challenge,
+	authURL := fmt.Sprintf("%s?client_id=%s&code_challenge=%s&code_challenge_method=S256&redirect_uri=%s&response_type=code&scope=%s&state=%s",
+		AuthURL, ClientID, challenge,
 		url.QueryEscape(redirectURI),
 		url.QueryEscape(Scope),
 		uuid4Hex(), // state 服务端只透传，无需承载内容
 	)
 
-	st := state{Verifier: verifier, RedirectURI: redirectURI, CallbackPort: port, AuthURL: authURL, CreatedAt: time.Now().Unix()}
+	st := state{Verifier: verifier, RedirectURI: redirectURI, AuthURL: authURL, CreatedAt: time.Now().Unix()}
 	if err := writeState(statePath, st); err != nil {
-		_ = ln.Close()
 		return "", err
 	}
 
-	// 起回调 server（异步等 code）
-	pending.reset()
-	mux := http.NewServeMux()
-	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		q := r.URL.Query()
-		if e := q.Get("error"); e != "" {
-			desc := q.Get("error_description")
-			if desc == "" {
-				desc = e
-			} else {
-				desc = desc + " (" + e + ")"
-			}
-			pending.fail(desc)
-			_, _ = io.WriteString(w, callbackPage(false, desc))
-			return
-		}
-		code := q.Get("code")
-		if code == "" {
-			pending.fail("回调缺少 code 参数")
-			_, _ = io.WriteString(w, callbackPage(false, "回调缺少 code 参数"))
-			return
-		}
-		pending.set(code)
-		// 注意：此时尚未完成 code 兑换（Poll 每 2s 轮询兑换），页面文案用「已收到授权」
-		// 而非「登录成功」，避免兑换失败时误导；1.5s 自动关闭不变。
-		_, _ = io.WriteString(w, callbackPage(true, ""))
-	})
-	callbackLn = ln
-	callbackSrv = &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
-	go func() { _ = callbackSrv.Serve(ln) }()
-	srvOnce = sync.Once{} // 允许下次登录重新 Start
+	// 注意：不再起本机回调 server（重定向目标是已注册的 gateway 地址）；
+	// code 的注入全部走 SubmitCallback（ labios 路径与 pollLogin 轮询）。
+	log.Printf("qwenwork 登录：已生成授权 URL，等待用户粘回回调地址（state 文件 %s）", statePath)
 
 	return authURL, nil
 }
 
 // SubmitCallback 让用户把浏览器地址栏里那串回调地址**手工**交回来。
 //
-// 为什么必须有这条路（与 internal/login_trae.SubmitCallback 同一个缺陷）：授权完成后
-// 上游把浏览器重定向到 `http://127.0.0.1:<随机端口>/callback?code=…`，而这个
-// 127.0.0.1 是**浏览器所在机器**。程序在 NAS / 容器里跑时，浏览器重定向到用户自己的
-// 电脑，端口没人监听 → 拒绝连接；**授权其实已经成功，code 就在那条 URL 里**，
-// 只是送不回程序这边。
+// 为什么必须有这条路：授权完成后，上游把浏览器重定向到已在 qwenwork 注册过的
+// 地址（`https://gateway.qwenwork.cn/oauth/callback?code=…`）；程序在 NAS/容器里跑时，
+// 这个地址只在**用户的浏览器**上可见，送不回 NAS 这边。
+// **授权其实已经成功，code 就在那条 URL 里**，用户复制地址栏粘过来即可。
 //
-// 注入走的是回调 server 用的同一个 pending 通道，所以 Poll 的兑换、超时、清理逻辑
+// 注入走的是同一个 pending 通道，所以 Poll 的兑换、超时、清理逻辑
 // 与自动路径完全一致，不存在两套实现。
 //
 // 接受三种粘贴形态：完整回调 URL、只带 query 的片段、裸 code（用户常只复制 code 值）。
@@ -276,15 +250,9 @@ func Poll(client *http.Client, statePath string) (Result, error) {
 	return res, nil
 }
 
-// Shutdown 关闭回调 server（登录结束/超时/取消时调用）。
-func Shutdown() {
-	srvOnce.Do(func() {})
-	if callbackSrv != nil {
-		_ = callbackSrv.Close()
-		callbackSrv = nil
-		callbackLn = nil
-	}
-}
+// Shutdown 当前无本地回调 server，保留此函数名用于对齐 app 层的调用
+//（无实际作用，避免外部调用出现引用错误）。
+func Shutdown() {}
 
 // ---------------------------------------------------------------------------
 // 保存凭证（对齐 qoder 渠道的 SaveAuth 契约）
