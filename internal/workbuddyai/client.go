@@ -322,8 +322,12 @@ func (c *Client) FetchModels(a *auth.Auth) ([]provider.ModelInfo, error) {
 	}
 	// v3 增强：补 v2 缺失的模型、以 v3 的能力/容量字段修正重复项。
 	// v3 里的模型也要过 brokenModels/disabled 过滤（同一套口径）。
-	if v3, verr := c.fetchV3Catalog(a); verr == nil {
-		raws, _ = mergeV3(raws, v3)
+	// 若 fetchCatalog 已因 v2 下线改用 v3 作主源，raws 已是 cli 定序的 v3 子集，
+	// 此时再 merge v3 全量会把 hy-image-3.5/kling-video-v3 等非 cli 模型混进来 → 跳过。
+	if !catalogFromV3() {
+		if v3, verr := c.fetchV3Catalog(a); verr == nil {
+			raws, _ = mergeV3(raws, v3)
+		}
 	}
 	seen := make(map[string]bool, len(raws)+len(extraModels))
 	out := make([]provider.ModelInfo, 0, len(raws)+len(extraModels))
@@ -372,10 +376,13 @@ func (c *Client) FetchModelPricing(a *auth.Auth) ([]provider.ModelPricing, error
 	if err != nil {
 		return nil, err
 	}
-	// v3 倍率并入（同 id 时 v3 非空优先，v3 独有模型直接新增）
+	// v3 倍率并入（同 id 时 v3 非空优先，v3 独有模型直接新增）。
+	// v2 下线、v3 已作主源时 raws 自带 credits 且已按 cli 定序，跳过二次 merge。
 	var v3Rates map[string]string
-	if v3, verr := c.fetchV3Catalog(a); verr == nil {
-		raws, v3Rates = mergeV3(raws, v3)
+	if !catalogFromV3() {
+		if v3, verr := c.fetchV3Catalog(a); verr == nil {
+			raws, v3Rates = mergeV3(raws, v3)
+		}
 	}
 	// 促销折扣（modelPromotions）优先：discount.factor==0 表示当前免费。
 	promo := c.fetchPromotions(a)

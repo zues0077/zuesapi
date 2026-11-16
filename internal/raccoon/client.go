@@ -405,7 +405,14 @@ type catalogModel struct {
 	Visible           bool     `json:"visible"`
 	BillingCategory   string   `json:"billing_category"`
 	BillingMultiplier float64  `json:"billing_multiplier"`
-	Tags              []string `json:"tags"`
+	// BillingEffectiveMultiplier 是叠加限时活动后的**实际扣费倍率**，客户端展示的就是它。
+	// 与 BillingMultiplier（基础倍率）不同：限免时基础 0.5、实际 0；折扣时基础 0.75、实际 0.5。
+	// 关键：0 是合法值（限免），不能用 `if eff != 0` 判断字段是否存在，必须用 *float64 区分
+	// 「上游明确返回 0」与「老版本上游根本没有该字段」（后者要回落基础倍率）。
+	BillingEffectiveMultiplier *float64 `json:"billing_effective_multiplier"`
+	BillingStatus              string   `json:"billing_status"`       // normal / limited_free / discount
+	BillingStatusNote          string   `json:"billing_status_note"`  // 如「限免到11月30日」
+	Tags                       []string `json:"tags"`
 	AbilityLevel      int      `json:"ability_level"`
 	Params            struct {
 		ContextWindow int64 `json:"context_window"`
@@ -489,7 +496,18 @@ func (c *Client) FetchModels(a *auth.Auth) ([]provider.ModelInfo, error) {
 	return out, nil
 }
 
-// FetchModelPricing 实现 provider.Upstream：倍率直接取上游 billing_multiplier。
+// FetchModelPricing 实现 provider.Upstream：倍率取上游**实际生效倍率** billing_effective_multiplier。
+//
+// 为什么不用 billing_multiplier：那是基础倍率，不含限时活动。官方客户端与小浣熊桌面端
+// 展示的是 billing_effective_multiplier（叠加活动后的真实扣费倍率）：
+//   - 限免：基础 0.5 / 实际 0（billing_status=limited_free）
+//   - 折扣：基础 0.75 / 实际 0.5（billing_status=discount，上游 discount 系数 0.67）
+//
+// 面板此前取基础倍率，导致 SenseNova Flash 显示 0.5 而客户端显示「限免」，Qwen4-Max
+// 显示 0.75 而客户端显示 0.5 —— 用户以为费率对不上。改为优先取实际倍率即可对齐。
+//
+// 兼容：老版本上游没有 billing_effective_multiplier 字段（指针为 nil）时回落基础倍率，
+// 保持旧行为；0 是限免的合法值，必须如实取 0，前端据 Explicit+Rate==0 自动显示「✦ Free」。
 func (c *Client) FetchModelPricing(a *auth.Auth) ([]provider.ModelPricing, error) {
 	_, models, err := c.fetchCatalog(a)
 	if err != nil {
@@ -505,10 +523,17 @@ func (c *Client) FetchModelPricing(a *auth.Auth) ([]provider.ModelPricing, error
 		if id == "" {
 			continue
 		}
+		rate := m.BillingMultiplier
+		if m.BillingEffectiveMultiplier != nil {
+			rate = *m.BillingEffectiveMultiplier
+		}
+		// 活动说明透传到面板徽标（限免/限时折扣的文案与截止时间）。
+		note := m.BillingStatusNote
 		out = append(out, provider.ModelPricing{
 			Model:    id,
 			Channel:  ChannelName,
-			Rate:     m.BillingMultiplier,
+			Rate:     rate,
+			Note:     note,
 			Explicit: &explicit,
 		})
 	}

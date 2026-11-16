@@ -1,23 +1,23 @@
-// Package login_qwenwork 实现千问办公（IDE 桌面版同款）OAuth 授权码登录：
-// PKCE(S256) + Ory Hydra 授权码流。
+// Package login_qwenwork 实现千问办公网页 device-flow 登录（无 App、无回调）。
 //
-// 链路（逆向自 ref/qwenwork_auth_20260919.saz，见备忘 §9）：
-//  1. Start：生成 PKCE + state，返回授权 URL（client_id=qwenwork-desktop-app，
-//     redirect_uri=在 qwenwork 注册的回调地址）。
-//     授权页成功 → 浏览器被重定向到 https://gateway.qwenwork.cn/oauth/callback?code=...
-//  2. 由于程序在 NAS/容器运行，浏览器无法回连 NAS 上的随机端口，所以上游把 code
-//     带回了已注册的 gateway 回调页；用户需要复制链接栏完整地址粘回面板（
-//     SubmitLoginCallback，已验证可工作），程序按与自动回调完全相同的 pending 通道
-//     拿 code 并兑换 token（见 app.login_callback.go 的设计总结）。
-//  3. Poll 兜底：与其它渠道一致的轮询语义（检查回调结果文件 / pending 通道），
-//     供 app.pollLogin 调用。
+// 链路（逆向自 QwenWorkCN 1.2.5 app.asar + 2026-09-30 在线探活，参考 xrp-cosy 规范）：
+//  1. Start：生成 PKCE verifier/challenge(S256) + nonce + 持久化 machine_id，
+//     返回 gateway.qwenwork.cn/device/selectAccounts?... 登录 URL。
+//  2. 浏览器打开该 URL → 302 到 qwenwork.cn/oauth2/auth（Hydra）→ 用户钉钉扫码/登录
+//     → 服务端把授权结果与我们的 nonce/challenge 绑定（完成态登记在服务端）。
+//     全程不需要本地回调监听，也不需要用户粘贴回调地址。
+//  3. Poll：拿 verifier 轮询 gateway.qwenwork.cn/api/v1/deviceToken/poll?nonce&verifier，
+//     404 / 400(INVALID_DEVICE_FLOW) = 进行中，2xx = 拿到 token+refresh_token；
+//     严格校验响应的 nonce/code_challenge/code_challenge_method 三连绑定后返回。
 //
-// 注意：桌面 IDE 官方 redirect_uri 是 https://gateway.qwenwork.cn/oauth/callback
-// （桌面进程内兑换），QwenWork 容器 | NAS 部署形态下利用同一已注册地址，
-// 代码不指向 127.0.0.1 本机端口。授权端点/Token 端点以官方
-// .well-known/openid-configuration 为准：
-//   authorization_endpoint = https://qwenwork.cn/oauth2/auth
-//   token_endpoint           = https://qwenwork.cn/auth/oauth/token
+// 为什么不用 OAuth 授权码回调：gateway.qwenwork.cn/oauth/callback 是官方桌面客户端
+// 专用回调页，要求 state 是客户端进程预置的会话。NAS 上用随机 state 发起授权，选完
+// 账号跳过去会报 INVALID_OAUTH_CALLBACK（state 校验失败、code 被吞），地址栏不会留下
+// 可复制的 code；device_code grant 对 qwenwork-desktop-app 未开放、动态注册被 WAF 拦、
+// loopback 回调未注册 —— 故网页 OAuth 自兑这条路彻底不通，改用 device flow。
+//
+// refresh_token 为 ory_rt_ 前缀，与 App 链路同构，落盘后走 internal/qwenwork 的
+// deviceToken/refresh 续期链，无需额外改造。
 package login_qwenwork
 
 import (
@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/big"
 	"net/http"
 	"net/url"
 	"os"
@@ -40,19 +41,32 @@ import (
 	"workbuddy-api/internal/auth"
 )
 
-// 上游常量（IDE 桌面版同款）。
+// 上游常量（device flow，2026-09-30 探活实证）。
 const (
-	// 千问办公 OAuth 端点（官方 .well-known/openid-configuration 实测值）
-	OAuthBase   = "https://qwenwork.cn"
-	AuthURL     = OAuthBase + "/oauth2/auth"
-	TokenURL    = OAuthBase + "/auth/oauth/token"
-	ClientID    = "qwenwork-desktop-app"
-	Scope       = "openid offline_access"
-	// 在 qwenwork 注册过的 redirect_uri：授权页能回调回这个地址（URL 由用户手动
-	// 粘回程序，见 SubmitCallback），而不是本地随机端口。
-	CallbackURI = "https://gateway.qwenwork.cn/oauth/callback"
-	callbackTTL = 5 * time.Minute // 本机回调 server 最长等待
+	// DeviceAuthBase 网页登录页 origin（/device/selectAccounts 挂这里）
+	DeviceAuthBase = "https://gateway.qwenwork.cn"
+	// DevicePollPath 轮询端点（GET ?nonce&verifier&challenge_method=S256）
+	DevicePollPath = "/api/v1/deviceToken/poll"
+	// DeviceClientID device-flow 专用 OAuth client（注意与桌面 OAuth 的
+	// qwenwork-desktop-app 不同；该值来自 QwenWorkCN 1.2.5 asar 常量）
+	DeviceClientID = "e883ade2-e6e3-4d6d-adf7-f92ceff5fdcb"
+	// DeviceRedirectURI App 深链回跳参数，纯网页登录无意义但 selectAccounts 白名单必填
+	DeviceRedirectURI = "qwenwork-cn://"
+	// PKCEChars verifier 字符集（OAuth RFC 7636 unreserved + App 实测）
+	PKCEChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
+
+	// machineIDFile 设备标识持久化文件名（从 statePath 派生，同目录）
+	machineIDFile = "qwenwork-machine-id.txt"
+
+	// 轮询行为（对齐 xrp-cosy 实测语义）
+	pollInterval       = 1 * time.Second   // 每次 Poll 调用内的请求间隔
+	pollRequestTimeout = 10 * time.Second  // 单请求超时
+	maxNetFailures     = 5                 // 连续网络错误容忍次数
+	callbackTTL        = 5 * time.Minute   // 复用旧名：登录总超时（app 层 loginTimeout 同值）
 )
+
+// gatewayBase 是 var 而非 const，便于单测替换成 httptest server。
+var gatewayBase = "https://gateway.qwenwork.cn"
 
 // ErrPending 表示授权尚未完成。
 var ErrPending = errors.New("login pending")
@@ -68,12 +82,16 @@ type Result struct {
 	IDToken string
 }
 
-// state 落盘的 PKCE 状态（供 Poll 与 SubmitCallback 共享）。
+// state 落盘的 device-flow 状态（供 Poll 共享）。
+// 旧字段 RedirectURI/AuthURL 保留仅为兼容旧测试与历史 state 文件，device flow 不写它们。
 type state struct {
-	Verifier     string `json:"verifier"`
-	RedirectURI  string `json:"redirect_uri"`
-	AuthURL      string `json:"auth_url"`
-	CreatedAt    int64  `json:"created_at"`
+	Verifier    string `json:"verifier"`               // PKCE verifier（poll 用）
+	Challenge   string `json:"challenge,omitempty"`    // PKCE S256 challenge（绑定校验用）
+	Nonce       string `json:"nonce,omitempty"`        // 本轮登录 nonce（绑定校验用）
+	MachineID   string `json:"machine_id,omitempty"`   // 持久化设备标识
+	RedirectURI string `json:"redirect_uri,omitempty"` // deprecated: OAuth 遗留，仅兼容
+	AuthURL     string `json:"auth_url,omitempty"`     // deprecated: OAuth 遗留，仅兼容
+	CreatedAt   int64  `json:"created_at"`
 }
 
 // pendingCode 展示的授权码（内存通道 + 文件双保险）：
@@ -95,34 +113,64 @@ func NewClient() *http.Client {
 	return &http.Client{Timeout: 30 * time.Second}
 }
 
-// Start 发起登录：生成 PKCE + state，返回授权 URL。
+// Start 发起 device-flow 登录：生成 PKCE + nonce + 持久化 machine_id，
+// 返回 gateway.qwenwork.cn/device/selectAccounts 登录 URL 供浏览器打开。
 //
-// 与桌面 IDE 相同：redirect_uri 使用已在 qwenwork 注册的 `https://gateway.qwenwork.cn/oauth/callback`，
-// 而非本机随机端口（NAS/容器部署下浏览器回连不到本地）。授权完成后浏览器会显示
-// `https://gateway.qwenwork.cn/oauth/callback?code=XXXX`（或报错/白屏），用户把地址栏
-// 完整地址粘回面板，由 SubmitCallback → pending 通道 → Poll 继续完成兑换。
+// 与网页 OAuth 的本质区别：用户完成登录后授权结果由服务端按 nonce/challenge 绑定，
+// 程序拿 verifier 轮询 deviceToken/poll 直接换 token —— 不需要本地回调，也不需要用户
+// 粘贴回调地址（NAS/容器部署下这是唯一能走通的路）。
 func Start(_ *http.Client, statePath string) (string, error) {
-	verifier, challenge := makePKCE()
+	verifier := makeVerifier()
+	challenge := pkceChallenge(verifier)
+	nonce := uuid4Hex()
+	machineID := resolveMachineID(statePath)
 
-	redirectURI := CallbackURI
+	q := url.Values{}
+	q.Set("challenge", challenge)
+	q.Set("challenge_method", "S256")
+	q.Set("nonce", nonce)
+	q.Set("machine_id", machineID)
+	q.Set("client_id", DeviceClientID)
+	q.Set("redirect_uri", DeviceRedirectURI)
+	authURL := DeviceAuthBase + "/device/selectAccounts?" + q.Encode()
 
-	authURL := fmt.Sprintf("%s?client_id=%s&code_challenge=%s&code_challenge_method=S256&redirect_uri=%s&response_type=code&scope=%s&state=%s",
-		AuthURL, ClientID, challenge,
-		url.QueryEscape(redirectURI),
-		url.QueryEscape(Scope),
-		uuid4Hex(), // state 服务端只透传，无需承载内容
-	)
-
-	st := state{Verifier: verifier, RedirectURI: redirectURI, AuthURL: authURL, CreatedAt: time.Now().Unix()}
+	st := state{
+		Verifier:  verifier,
+		Challenge: challenge,
+		Nonce:     nonce,
+		MachineID: machineID,
+		CreatedAt: time.Now().Unix(),
+	}
 	if err := writeState(statePath, st); err != nil {
 		return "", err
 	}
 
-	// 注意：不再起本机回调 server（重定向目标是已注册的 gateway 地址）；
-	// code 的注入全部走 SubmitCallback（ labios 路径与 pollLogin 轮询）。
-	log.Printf("qwenwork 登录：已生成授权 URL，等待用户粘回回调地址（state 文件 %s）", statePath)
-
+	log.Printf("qwenwork 登录：已生成 device-flow 登录 URL（machine_id=%s，state 文件 %s）",
+		maskMachineID(machineID), statePath)
 	return authURL, nil
+}
+
+// resolveMachineID 读取（或首次生成并持久化）设备标识。
+// 复用即稳定：服务端视其为同一设备，避免每轮登录都变成新设备。
+func resolveMachineID(statePath string) string {
+	fp := filepath.Join(filepath.Dir(statePath), machineIDFile)
+	if raw, err := os.ReadFile(fp); err == nil {
+		if id := strings.TrimSpace(string(raw)); id != "" {
+			return id
+		}
+	}
+	id := uuid4Hex()
+	if err := os.WriteFile(fp, []byte(id), 0o600); err != nil {
+		log.Printf("qwenwork 登录：machine_id 持久化失败（本次用内存值）：%v", err)
+	}
+	return id
+}
+
+func maskMachineID(id string) string {
+	if len(id) <= 8 {
+		return id
+	}
+	return id[:8] + "…"
 }
 
 // SubmitCallback 让用户把浏览器地址栏里那串回调地址**手工**交回来。
@@ -176,11 +224,31 @@ func SubmitCallback(statePath, pasted string) error {
 	return nil
 }
 
-// Poll 单次检查登录结果；未完成返回 ErrPending；成功兑换 token 并清理。
+// netFailures 连续网络错误计数（成功响应后清零，达到上限视为终态失败）。
+// app 每 2s 调一次 Poll，计数跨调用累积；用 state 的 nonce 做 key，换一轮登录自动重置。
+var netFailures = struct {
+	sync.Mutex
+	nonce string
+	count int
+}{}
+
+// Poll 单次 deviceToken/poll 请求；未完成返回 ErrPending；成功校验绑定后返回 Result。
+//
+// 语义（对齐 xrp-cosy 实测）：
+//   - 404 / 400{errorCode:INVALID_DEVICE_FLOW} = 登录进行中 → ErrPending
+//   - 其它 4xx/5xx = 协议/服务错误 → 终态失败
+//   - 2xx = 完成 → 三连绑定校验（nonce/code_challenge/code_challenge_method）后返回 token
+//   - 网络错误（含单请求超时）：连续达 5 次才视为终态失败
+//   - 总超时与 app.loginTimeout（5min）一致，由 app 层 deadline 兜底；这里也自清一次。
 func Poll(client *http.Client, statePath string) (Result, error) {
 	st, err := readState(statePath)
 	if err != nil {
 		return Result{}, fmt.Errorf("read state: %w", err)
+	}
+	// 老 state 文件（OAuth 时代）没有 nonce/challenge：提示重发登录
+	if st.Nonce == "" || st.Challenge == "" || st.Verifier == "" {
+		_ = os.Remove(statePath)
+		return Result{}, fmt.Errorf("登录状态已过期（旧版格式），请重新点「+ 千问办公」发起登录")
 	}
 	// 超时清理
 	if time.Since(time.Unix(st.CreatedAt, 0)) > callbackTTL {
@@ -189,65 +257,113 @@ func Poll(client *http.Client, statePath string) (Result, error) {
 		return Result{}, fmt.Errorf("登录超时（5 分钟），请重试")
 	}
 
-	code, errMsg, ok := pending.snapshot()
-	if !ok {
-		if errMsg != "" {
-			Shutdown()
-			_ = os.Remove(statePath)
-			return Result{}, fmt.Errorf("登录失败: %s", errMsg)
-		}
-		return Result{}, ErrPending
-	}
-	defer func() { Shutdown(); _ = os.Remove(statePath) }()
+	q := url.Values{}
+	q.Set("nonce", st.Nonce)
+	q.Set("verifier", st.Verifier)
+	q.Set("challenge_method", "S256")
+	pollURL := gatewayBase + DevicePollPath + "?" + q.Encode()
 
-	// 兑换 token（Hydra 标准 token endpoint，public client + PKCE）
-	form := url.Values{
-		"grant_type":    {"authorization_code"},
-		"code":          {code},
-		"redirect_uri":  {st.RedirectURI},
-		"client_id":     {ClientID},
-		"code_verifier": {st.Verifier},
-	}
-	req, err := http.NewRequest(http.MethodPost, TokenURL, strings.NewReader(form.Encode()))
+	req, err := http.NewRequest(http.MethodGet, pollURL, nil)
 	if err != nil {
 		return Result{}, err
 	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
-	resp, err := client.Do(req)
+	req.Header.Set("X-Request-Id", uuid4Hex())
+	req.Header.Set("X-QwenWork-Version", "1.2.5")
+	// 单请求超时：用带超时的 client，避免拖住 app 的 2s ticker
+	pollClient := *client
+	pollClient.Timeout = pollRequestTimeout
+	resp, err := pollClient.Do(req)
 	if err != nil {
-		return Result{}, err
+		// 网络错误：连续计数，未达上限按进行中处理
+		if incrNetFailure(st.Nonce) < maxNetFailures {
+			log.Printf("qwenwork device poll 网络错误（第 %d 次，容忍中）：%v", netFailureCount(), err)
+			return Result{}, ErrPending
+		}
+		_ = os.Remove(statePath)
+		return Result{}, fmt.Errorf("deviceToken/poll 连续 %d 次网络错误：%w", maxNetFailures, err)
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if resp.StatusCode >= 400 {
-		return Result{}, fmt.Errorf("token exchange http %d: %s", resp.StatusCode, truncate(string(raw), 300))
+
+	// 进行中：404 或 400{errorCode:INVALID_DEVICE_FLOW}
+	if resp.StatusCode == http.StatusNotFound {
+		resetNetFailure()
+		return Result{}, ErrPending
 	}
-	var tok struct {
-		AccessToken  string `json:"access_token"`
-		RefreshToken string `json:"refresh_token"`
-		ExpiresIn    int64  `json:"expires_in"`
-		IDToken      string `json:"id_token"`
+	if resp.StatusCode == http.StatusBadRequest {
+		var peek struct {
+			ErrorCode string `json:"errorCode"`
+		}
+		_ = json.Unmarshal(raw, &peek)
+		if peek.ErrorCode == "INVALID_DEVICE_FLOW" {
+			resetNetFailure()
+			return Result{}, ErrPending
+		}
+		_ = os.Remove(statePath)
+		return Result{}, fmt.Errorf("deviceToken/poll 400: %s", truncate(string(raw), 300))
 	}
-	if err := json.Unmarshal(raw, &tok); err != nil {
-		return Result{}, fmt.Errorf("token parse: %w (body: %s)", err, truncate(string(raw), 200))
-	}
-	if tok.AccessToken == "" {
-		return Result{}, fmt.Errorf("token exchange: missing access_token (body: %s)", truncate(string(raw), 200))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		_ = os.Remove(statePath)
+		return Result{}, fmt.Errorf("deviceToken/poll http %d: %s", resp.StatusCode, truncate(string(raw), 300))
 	}
 
+	// 2xx：解析 + 三连绑定校验（防串号采纳他人凭据）
+	var tok struct {
+		Token                string `json:"token"`
+		RefreshToken         string `json:"refresh_token"`
+		Nonce                string `json:"nonce"`
+		CodeChallenge        string `json:"code_challenge"`
+		CodeChallengeMethod  string `json:"code_challenge_method"`
+		ExpiresIn            int64  `json:"expires_in"`
+		IDToken              string `json:"id_token"`
+	}
+	if err := json.Unmarshal(raw, &tok); err != nil {
+		return Result{}, fmt.Errorf("deviceToken/poll parse: %w (body: %s)", err, truncate(string(raw), 200))
+	}
+	if tok.Nonce != st.Nonce || tok.CodeChallenge != st.Challenge || tok.CodeChallengeMethod != "S256" {
+		_ = os.Remove(statePath)
+		return Result{}, fmt.Errorf("deviceToken/poll 绑定校验失败（nonce/challenge 不匹配），拒绝采纳")
+	}
+	if tok.Token == "" || tok.RefreshToken == "" {
+		return Result{}, fmt.Errorf("deviceToken/poll 响应缺少 token/refresh_token")
+	}
+	resetNetFailure()
+	defer func() { Shutdown(); _ = os.Remove(statePath) }()
+
 	res := Result{
-		AccessToken:  tok.AccessToken,
+		AccessToken:  tok.Token,
 		RefreshToken: tok.RefreshToken,
 		ExpiresIn:    tok.ExpiresIn,
 		IDToken:      tok.IDToken,
 	}
-	// 从 JWT 解 uid/nickname（token endpoint 不返回 userinfo）
-	res.UID, res.Nickname = parseJWTIdentity(tok.AccessToken)
+	// 从 JWT 解 uid/nickname（poll 响应不返回 userinfo）
+	res.UID, res.Nickname = parseJWTIdentity(tok.Token)
 	if res.UID == "" {
 		res.UID, _ = parseJWTIdentity(tok.IDToken)
 	}
 	return res, nil
+}
+
+// incrNetFailure/resetNetFailure/netFailureCount 网络错误计数（按 nonce 隔离，换轮重置）。
+func incrNetFailure(nonce string) int {
+	netFailures.Lock()
+	defer netFailures.Unlock()
+	if netFailures.nonce != nonce {
+		netFailures.nonce, netFailures.count = nonce, 0
+	}
+	netFailures.count++
+	return netFailures.count
+}
+func resetNetFailure() {
+	netFailures.Lock()
+	netFailures.nonce, netFailures.count = "", 0
+	netFailures.Unlock()
+}
+func netFailureCount() int {
+	netFailures.Lock()
+	defer netFailures.Unlock()
+	return netFailures.count
 }
 
 // Shutdown 当前无本地回调 server，保留此函数名用于对齐 app 层的调用
@@ -325,14 +441,30 @@ func (p *pendingCode) snapshot() (code, errMsg string, ok bool) {
 	return p.code, p.errMsg, p.code != ""
 }
 
-// makePKCE 生成 verifier + S256 challenge（43 字符 base64url，RFC 7636）。
-func makePKCE() (verifier, challenge string) {
-	buf := make([]byte, 48)
-	_, _ = rand.Read(buf)
-	verifier = base64.RawURLEncoding.EncodeToString(buf)
+// makeVerifier 生成 PKCE verifier：字符集与长度分布对齐 QwenWorkCN App
+//（43 + rand(0..85) → 43..128，CSPRNG、无模偏），字符集 PKCEChars。
+func makeVerifier() string {
+	lengthN, err := rand.Int(rand.Reader, big.NewInt(86)) // [0,86)
+	if err != nil {
+		return strings.Repeat("A", 43) // 极端兜底：安全强度仍满足 RFC 7636
+	}
+	length := 43 + int(lengthN.Int64())
+	charsN := big.NewInt(int64(len(PKCEChars)))
+	out := make([]byte, length)
+	for i := range out {
+		idx, err := rand.Int(rand.Reader, charsN)
+		if err != nil {
+			return strings.Repeat("A", 43)
+		}
+		out[i] = PKCEChars[idx.Int64()]
+	}
+	return string(out)
+}
+
+// pkceChallenge 计算 S256 challenge（base64url 无填充，恒 43 字符）。
+func pkceChallenge(verifier string) string {
 	sum := sha256.Sum256([]byte(verifier))
-	challenge = base64.RawURLEncoding.EncodeToString(sum[:])
-	return
+	return base64.RawURLEncoding.EncodeToString(sum[:])
 }
 
 // uuid4Hex 简单 state（服务端透传，不承载内容）。

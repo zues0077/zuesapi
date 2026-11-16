@@ -160,72 +160,107 @@ async function refreshFees() {
   }
 }
 
-// ---- 写入 WorkBuddy 客户端模型清单（写入 ~/.workbuddy/models.json）----
+// ---- 导出模型名称（替代原「写入 models.json」）----
 //
-// 写入是**整体覆盖**用户的自定义清单，故必须先预览（拿真实的「会覆盖多少条」），
-// 再由用户确认；后端也要求显式 confirm=true 才落盘。
-let mjPreview = null;
+// 痛点：用户在 WorkBuddy 客户端加自定义模型时，不知道「模型名」该怎么写 ——
+// 要不要带渠道前缀、要不要带倍率后缀。这里把费率表里真实可用的模型名，
+// 按 `channel/model (0.10x)` 的完整形态一次性导出，用户直接复制/下载即可粘贴，
+// 零猜测。后缀是备注（后端路由会剥掉），渠道前缀才是真正的路由键（必须准确）。
 
-// exportModelsJson 预览 → 弹覆盖警告 → 用户确认后写入。
-async function exportModelsJson() {
-  let pv;
-  try {
-    pv = await api("/api/fees/models_json");
-  } catch (e) { toast(e.message); return; }
+// buildModelNamesLines 纯函数：把 channels 按 scope 展平成「每行一个完整模型名」。
+// 抽成纯函数便于无 DOM 单测（见 web 导出的 Node 用例）。
+//   scope = "active" → 仅 renderFees.lastCh 选中的渠道；"all" → 全部渠道
+//   只取有倍率的模型（与费率表默认口径一致，无倍率的内部/子代理模型不导出）
+function buildModelNamesLines(channels, scope, activeCh) {
+  const lines = [];
+  for (const ch of channels || []) {
+    if (scope !== "all" && ch.channel !== activeCh) continue;
+    for (const m of (ch.models || [])) {
+      if (!m || !m.model || !m.priced) continue;
+      lines.push(`${ch.channel}/${m.model} (${Number(m.rate).toFixed(2)}x)`);
+    }
+  }
+  return lines;
+}
 
-  if (!pv.api_key_set) {
-    toast("未设置 API Key，无法写入自定义模型");
+let exportScope = "active"; // 弹窗当前范围：active=当前渠道 / all=全部渠道
+
+// exportModelsBtnLabel 费率页按钮的动态文案：跟随当前选中的渠道 tab。
+function exportModelsBtnLabel() {
+  const ch = renderFees.lastCh;
+  return ch ? `导出「${chLabel(ch)}」模型名称` : "导出模型名称";
+}
+
+// syncExportModelsBtn 在渲染/切 tab 后同步按钮文案，让「导出谁」一眼可见。
+function syncExportModelsBtn() {
+  const btn = $("btnExportModels");
+  if (btn) btn.textContent = exportModelsBtnLabel();
+}
+
+function openExportModels() {
+  const data = renderFees.lastData;
+  if (!data || !(data.channels || []).length) {
+    toast("还没有模型数据，请先点「刷新」");
     return;
   }
-  if (!pv.will_write) {
-    toast("没有可写入的模型：请先点「刷新」获取倍率数据");
-    return;
-  }
-  mjPreview = pv;
-  $("mjMsg").innerHTML = modelsJsonConfirmHTML(pv);
-  $("modelsJsonOverlay").classList.remove("hidden");
+  exportScope = "active";
+  $("exportModelsTitle").textContent = `导出模型名称 · ${exportModelsBtnLabel().replace("导出「", "").replace("」模型名称", "")}`;
+  syncExportScopeBtns();
+  renderExportModelsText();
+  $("exportModelsOverlay").classList.remove("hidden");
 }
 
-// modelsJsonConfirmHTML 组装确认文案。覆盖与新建两种情形的措辞完全不同 ——
-// 「会覆盖你 N 条自定义模型」必须显式说出来，不能含糊成「将更新」。
-function modelsJsonConfirmHTML(pv) {
-  const rows = [];
-  rows.push(`<div class="glm-warn">
-    <div class="glm-warn-title">⚠️ ${pv.exists ? "这会覆盖已有的自定义模型清单" : "即将新建自定义模型清单"}</div>
-    <ol>
-      ${pv.exists
-        ? `<li>目标文件已存在，其中 <b>${pv.existing_count}</b> 条自定义模型将被<b>整体覆盖</b>。</li>`
-        : "<li>目标文件不存在，将新建。</li>"}
-      <li>写入前会自动备份为 <code>models.json.bak-时间戳</code>（同目录），但仍建议你自己先备份一份。</li>
-      <li>写入后需在 WorkBuddy 里<b>重启或刷新</b>模型列表才会看到。</li>
-    </ol>
-  </div>`);
-  rows.push(`<div class="hint" style="margin-top:0">
-    将写入 <b>${pv.will_write}</b> 个模型${pv.skipped ? `（另有 ${pv.skipped} 个无倍率模型不写入）` : ""}<br>
-    文件：<code>${esc(pv.path)}</code><br>
-    端点：<code>${esc(pv.endpoint)}</code>
-  </div>`);
-  return rows.join("");
+function closeExportModels() {
+  $("exportModelsOverlay").classList.add("hidden");
 }
 
-// confirmModelsJson 确认写入（后端同样要求 confirm=true，双保险）。
-async function confirmModelsJson() {
-  if (!mjPreview) { closeModelsJson(); return; }
-  $("btnMjConfirm").disabled = true;
-  try {
-    const r = await api("/api/fees/models_json", { confirm: true });
-    closeModelsJson();
-    toast(r.note || `已写入 ${r.count} 条自定义模型`);
-  } catch (e) {
-    toast(e.message);
-  } finally {
-    $("btnMjConfirm").disabled = false;
-  }
+// syncExportScopeBtns 范围切换按钮的高亮态。
+function syncExportScopeBtns() {
+  $("btnExportScopeActive").classList.toggle("on", exportScope === "active");
+  $("btnExportScopeAll").classList.toggle("on", exportScope === "all");
 }
 
-function closeModelsJson() {
-  mjPreview = null;
-  $("modelsJsonOverlay").classList.add("hidden");
+// setExportScope 切换范围并重算清单。
+function setExportScope(scope) {
+  exportScope = scope;
+  syncExportScopeBtns();
+  renderExportModelsText();
+}
+
+// renderExportModelsText 按当前范围生成清单填进 textarea，并给出条数/说明。
+function renderExportModelsText() {
+  const data = renderFees.lastData;
+  const lines = buildModelNamesLines(
+    data ? data.channels : [], exportScope, renderFees.lastCh);
+  $("exportModelsText").value = lines.join("\n");
+  const scopeName = exportScope === "all" ? "全部渠道" : chLabel(renderFees.lastCh);
+  $("exportModelsHint").textContent = lines.length
+    ? `范围：${scopeName} · 共 ${lines.length} 个模型。格式为「渠道/模型名 (倍率x)」，可直接粘贴到客户端；括号里的倍率只是备注（后端会自动剥掉），渠道前缀才是真正的路由键。`
+    : "当前范围没有可导出的模型（请先点「刷新」获取倍率）。";
+}
+
+// copyExportModels 一键复制全部模型名。
+function copyExportModels() {
+  const text = $("exportModelsText").value;
+  if (!text) { toast("没有可复制的模型名"); return; }
+  copyText(text, "模型名称");
+}
+
+// downloadExportModels 下载清单为 .txt（UTF-8，每行一个）。
+function downloadExportModels() {
+  const text = $("exportModelsText").value;
+  if (!text) { toast("没有可下载的模型名"); return; }
+  const blob = new Blob([text + "\n"], { type: "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  const scopeName = exportScope === "all" ? "all" : (renderFees.lastCh || "channel");
+  a.download = `model-names-${scopeName}.txt`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  toast("模型名称清单已下载");
 }
 
 // ---------- 积分明细 tooltip ----------
@@ -911,6 +946,8 @@ function renderFees(fees) {
 
   html += `<div class="note" style="margin-top:8px">${esc(fees.disclaimer || "")}</div>`;
   box.innerHTML = html;
+  // 导出按钮文案跟随当前选中渠道（如「导出「小浣熊」模型名称」）。
+  syncExportModelsBtn();
 }
 
 // ---- 「显示隐藏模型」开关 ----
@@ -1025,10 +1062,12 @@ function bindFeesTabs() {
     const ch = btn.dataset.feech;
     renderFees.lastCh = ch;
     box.querySelectorAll(".fees-tab").forEach((x) => x.classList.toggle("active", x === btn));
-          box.querySelectorAll(".fees-panel").forEach(function (p) {
+    box.querySelectorAll(".fees-panel").forEach(function (p) {
         if (p.dataset.feepanel === ch) { p.classList.remove("hidden"); }
         else { p.classList.add("hidden"); }
       });
+    // 切换渠道后同步导出按钮文案，让「导出谁」跟着 tab 走。
+    syncExportModelsBtn();
   });
   // 键盘可达：模型名支持 Enter/Space 复制（与 role="button" 对应）。
   box.addEventListener("keydown", (e) => {
@@ -1330,7 +1369,7 @@ let pendingAction = "login";
 // 无手动签到渠道的登录提示差异文案（国际版会自动领日活奖励）。
 const NO_CHECKIN_LOGIN_HINT = {
   workbuddyai: "（无需手动签到，定时自动对话保活并领取日活奖励）",
-  qwenwork: "（每日积分服务端 00:00 自动发放；若浏览器已登录千问办公则全自动完成，否则需扫码一次）",
+  qwenwork: "（每日积分服务端 00:00 自动发放；登录走设备码流程——浏览器打开后在页面完成登录/扫码即可，本工具会自动轮询拿到凭据，无需粘贴回调）",
   monkeycode: "（凭据来自本机已登录的 MonkeyCode 客户端；上游无续期接口，客户端重新登录后需再次导入）",
   raccoon: "（凭据来自本机已登录的小浣熊客户端；access_token 约 2 小时，本工具会自动续期）",
   loomy: "（凭据来自本机已登录的 Loomy 客户端；上游无续期接口，约 14 天后需重新登录并再次导入）",
@@ -1589,8 +1628,9 @@ async function importLocal(channel) {
 // 使用「本机回调」的渠道：程序在 NAS / 容器里跑时，浏览器被重定向到的 127.0.0.1
 // 是用户自己的电脑，回调端口没人监听 → 页面报拒绝连接，但授权其实已经成功、
 // 凭证就在那条 URL 里。对这些渠道显示「粘贴回调」兜底入口。
+// qwenwork 已改用 device flow（poll 轮询直接换 token，无需回调/粘贴）；
 // qoder 系走设备码轮询、智谱清言走 CDP/粘 Cookie、小浣熊走协议深链，都不需要。
-const CALLBACK_LOGIN_CHANNELS = new Set(["traework", "traecode", "qwenwork"]);
+const CALLBACK_LOGIN_CHANNELS = new Set(["traework", "traecode"]);
 let loginChannel = "";
 
 async function startLogin(channel) {
@@ -1602,8 +1642,10 @@ async function startLogin(channel) {
     $("loginTitle").textContent = `添加 ${chLabel(channel)} 账号`;
     $("loginMsg").textContent = hasProtocolLogin(channel)
       ? `请在浏览器新窗口中完成${chLabel(channel)}登录；完成后本工具会自动接管回调并保存账号（期间请勿启动${chLabel(channel)}客户端）。`
-      : "请在浏览器新窗口中完成登录…";
-    // 兜底粘贴框：按渠道显示，并清空上一轮残留
+      : channel === "qwenwork"
+        ? "请在打开的浏览器页面中完成千问办公登录（钉钉扫码或账号登录）；登录成功后本工具会自动轮询拿到凭据并保存账号，无需回到这里粘贴任何地址，稍等几秒即可。"
+        : "请在浏览器新窗口中完成登录…";
+    // 兜底粘贴框：按渠道显示，并清空上一轮残留（device flow 的 qwenwork 不需要）
     const useCb = CALLBACK_LOGIN_CHANNELS.has(channel);
     $("cbFallback").classList.toggle("hidden", !useCb);
     if (useCb) {
@@ -2332,12 +2374,15 @@ function bind() {
   $("btnCopyUrl").onclick = copyUrl;
   $("btnCancelLogin").onclick = cancelLogin;
   $("btnRefreshFees").onclick = refreshFees;
-  $("btnExportModels").onclick = exportModelsJson;
+  $("btnExportModels").onclick = openExportModels;
   $("btnShowAllModels").onclick = toggleShowAllModels;
   $("feeSearch").addEventListener("input", applyFeeSearch);
-  $("btnMjConfirm").onclick = confirmModelsJson;
-  $("btnMjCancel").onclick = closeModelsJson;
-  $("modelsJsonOverlay").onclick = (e) => { if (e.target === $("modelsJsonOverlay")) closeModelsJson(); };
+  $("btnExportCopy").onclick = copyExportModels;
+  $("btnExportDownload").onclick = downloadExportModels;
+  $("btnExportClose").onclick = closeExportModels;
+  $("btnExportScopeActive").onclick = () => setExportScope("active");
+  $("btnExportScopeAll").onclick = () => setExportScope("all");
+  $("exportModelsOverlay").onclick = (e) => { if (e.target === $("exportModelsOverlay")) closeExportModels(); };
   $("chkAutostart").onchange = toggleAutostart;
   $("selStrategy").onchange = syncStrategyDesc;
   $("btnAdminLogout").onclick = () => logout();

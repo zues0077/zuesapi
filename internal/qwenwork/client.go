@@ -335,9 +335,48 @@ type modelEntry struct {
 	MaxInputTokens int64   `json:"max_input_tokens"`
 }
 
-// FetchModels COSY GET /api/v2/model/list，取 scene=qwork 的档位列表。
-// GET 无 body，签名用空串 ""（非 "{}"，后者 403 Signature invalid，与 qoder 一致）。
+// FetchModels 拉取千问模型清单。
+//
+// 主源：网页 /api/chat-modes（Bearer，scene=qwork）——与费率同源、动态跟随上游：
+// 上游新增/下架模型、调倍率都实时反映（2026-11-17 实测已返 13 款新模型）。
+// 回退：COSY GET /api/v2/model/list（该端点更新滞后，实测仍只返 3 款老档）。
+//
+// 内核模型名与展示名的映射放在 ModelKey()/staticModelKeys；新 key 查不到时原样透传，
+// 故 13 款新模型无需补别名表即可出现在清单并被推理路由（P2 非跟随必需）。
 func (c *Client) FetchModels(a *auth.Auth) ([]provider.ModelInfo, error) {
+	// 主源：chat-modes 动态清单
+	if modes, err := c.fetchChatModes(a); err == nil && len(modes) > 0 {
+		out := make([]provider.ModelInfo, 0, len(modes))
+		for _, m := range modes {
+			if m.Key == "" || !m.Enable {
+				continue
+			}
+			ctx := m.MaxInputTokens
+			if ctx <= 0 {
+				ctx = 180_000
+			}
+			out = append(out, provider.ModelInfo{
+				ID:            m.Key,
+				Name:          chatModeName(m),
+				ContextWindow: ctx,
+				SupportsImages:    m.IsVL,
+				SupportsReasoning: m.IsReasoning,
+				SupportsTools:     true, // 网页未声明工具位，实测各档均支持
+			})
+		}
+		if len(out) > 0 {
+			return out, nil
+		}
+		log.Printf("qwenwork models via chat-modes empty qwork scene（回退 model/list）")
+	} else if err != nil {
+		log.Printf("qwenwork models via chat-modes failed: %v（回退 model/list）", truncate(err.Error(), 120))
+	}
+	return c.fetchModelsFromGateway(a)
+}
+
+// fetchModelsFromGateway 回退源：COSY GET /api/v2/model/list，取 scene=qwork。
+// GET 无 body，签名用空串 ""（非 "{}"，后者 403 Signature invalid，与 qoder 一致）。
+func (c *Client) fetchModelsFromGateway(a *auth.Auth) ([]provider.ModelInfo, error) {
 	uid, name, email, token := identity(a)
 	if token == "" {
 		return nil, fmt.Errorf("no access token")
@@ -409,54 +448,105 @@ func displayName(m modelEntry) string {
 }
 
 // chatMode 网页 /api/chat-modes 单条（qwork scene）。
+// 该接口是千问模型清单与费率的**同源动态源**：上游新增/下架模型、调倍率都在这里
+// 实时反映（2026-11-17 实测已返 13 款，而 COSY /api/v2/model/list 仍只返 3 款）。
 type chatMode struct {
-	Key            string `json:"key"`
-	PriceFactor    float64
+	Key            string  `json:"key"`
 	Factor         float64 `json:"price_factor"`
 	CostFactor     float64 `json:"cost_factor"`
 	Enable         bool    `json:"enable"`
 	IsNew          bool    `json:"is_new"`
+	IsReasoning    bool    `json:"is_reasoning"`
+	IsVL           bool    `json:"is_vl"`
 	MaxInputTokens int64   `json:"max_input_tokens"`
+	I18N           struct {
+		DisplayName map[string]string `json:"display_name"`
+	} `json:"i18n"`
+}
+
+// chatModeName 取展示名：中文优先 → 英文 → key。
+func chatModeName(m chatMode) string {
+	if zh := m.I18N.DisplayName["zh"]; zh != "" {
+		return zh
+	}
+	if en := m.I18N.DisplayName["en"]; en != "" {
+		return en
+	}
+	return m.Key
+}
+
+// fetchChatModes 拉取 chat-modes 的 qwork scene（Bearer，动态源）。
+// 单一入口供 FetchModels / FetchModelPricing 共用，避免两处重复解析。
+//
+// 关键：该端点实测返回**裸 scenes map**（{"qwork":[...]}），没有 {code,data} 信封
+// ——不能走 doBearer（它按信封解会拿到空 data，静默回退静态表，是隐藏 bug）。
+// 这里直接读 body，并兼容「裸 map」与「信封」两种形态以适配上游改版。
+func (c *Client) fetchChatModes(a *auth.Auth) ([]chatMode, error) {
+	req, err := http.NewRequest(http.MethodGet, c.web()+EpChatModes, nil)
+	if err != nil {
+		return nil, err
+	}
+	bearerHeaders(req, a)
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode >= 400 {
+		return nil, &provider.Error{Kind: Classify(resp.StatusCode, string(raw)),
+			Status: resp.StatusCode, Msg: truncate(string(raw), 200)}
+	}
+	// 先试裸 scenes map；若带信封（{"code":"ok","data":{...}}），直接解会失败，
+	// 此时取 data 再解一次。两条路只走一条，互不干扰。
+	var scenes map[string][]chatMode
+	if err := json.Unmarshal(raw, &scenes); err != nil || len(scenes) == 0 {
+		var env struct {
+			Data json.RawMessage `json:"data"`
+		}
+		if json.Unmarshal(raw, &env) == nil && len(env.Data) > 0 {
+			scenes = nil
+			if e := json.Unmarshal(env.Data, &scenes); e != nil {
+				return nil, fmt.Errorf("chat-modes envelope parse: %w (body: %s)", e, truncate(string(raw), 120))
+			}
+		} else if err != nil {
+			return nil, fmt.Errorf("chat-modes parse: %w (body: %s)", err, truncate(string(raw), 120))
+		}
+	}
+	return scenes["qwork"], nil
 }
 
 // FetchModelPricing 费率：优先网页 /api/chat-modes（Bearer，price_factor），
 // 失败回退静态表。Rate 语义与 workbuddy-api 一致（相对倍率，pro=1.0 基准）。
 func (c *Client) FetchModelPricing(a *auth.Auth) ([]provider.ModelPricing, error) {
-	url := c.web() + EpChatModes
-	data, err := c.doBearer(url, a)
-	if err == nil {
-		var scenes map[string][]chatMode
-		if json.Unmarshal(data, &scenes) == nil {
-			rows := scenes["qwork"]
-			if len(rows) > 0 {
-				out := make([]provider.ModelPricing, 0, len(rows))
-				for _, m := range rows {
-					if m.Key == "" || !m.Enable {
-						continue
-					}
-					rate := m.Factor
-					if rate == 0 {
-						rate = m.CostFactor
-					}
-					note := ""
-					if m.IsNew {
-						note = "新档位"
-					}
-					explicit := true
-					out = append(out, provider.ModelPricing{
-						Model:    m.Key,
-						Channel:  ChannelName,
-						Rate:     rate,
-						Note:     note,
-						Explicit: &explicit,
-					})
-				}
-				if len(out) > 0 {
-					return out, nil
-				}
+	rows, err := c.fetchChatModes(a)
+	if err == nil && len(rows) > 0 {
+		out := make([]provider.ModelPricing, 0, len(rows))
+		for _, m := range rows {
+			if m.Key == "" || !m.Enable {
+				continue
 			}
+			rate := m.Factor
+			if rate == 0 {
+				rate = m.CostFactor
+			}
+			note := ""
+			if m.IsNew {
+				note = "新档位"
+			}
+			explicit := true
+			out = append(out, provider.ModelPricing{
+				Model:    m.Key,
+				Channel:  ChannelName,
+				Rate:     rate,
+				Note:     note,
+				Explicit: &explicit,
+			})
 		}
-	} else {
+		if len(out) > 0 {
+			return out, nil
+		}
+	} else if err != nil {
 		log.Printf("qwenwork pricing via chat-modes failed: %v（回退静态表）", truncate(err.Error(), 120))
 	}
 	// 回退静态表

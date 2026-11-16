@@ -478,6 +478,17 @@ code.about-repo:active { transform: translateY(1px); }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .login-buttons { display: flex; gap: 8px; margin-top: 14px; }
 
+/* 导出模型名称弹层：范围切换 + 可复制清单 */
+.export-scope { display: flex; gap: 8px; margin-bottom: 8px; }
+.export-models-text {
+  width: 100%; min-height: 220px; max-height: 52vh; margin-top: 8px;
+  box-sizing: border-box; resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12.5px; line-height: 1.7; color: var(--text);
+  background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+  padding: 10px 12px; word-break: normal; white-space: pre;
+}
+
 /* 统一设置弹层内部分区 */
 .settings-body { word-break: normal; }
 .cfg-section { padding: 12px 0 4px; border-top: 1px solid var(--border); }

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -73,9 +74,18 @@ type catalogCache struct {
 	colors  map[string]string
 	fetched time.Time
 
-	v3      []catalogModel // /v3/config 全量模型面（不过滤）
-	v3OK    bool           // v3 探测是否成功过（失败不写缓存，避免负缓存住坏结果）
+	v3        []catalogModel // /v3/config 全量模型面（不过滤）
+	v3OK      bool           // v3 探测是否成功过（失败不写缓存，避免负缓存住坏结果）
 	v3Fetched time.Time
+	v3CLIIDs  []string      // v3 agents[cli].models 权威顺序（v2 下线后作主源定序用）
+	fromV3    bool          // 当前 cache.models 是否来自 v3 主源（true 时下游跳过二次 mergeV3）
+}
+
+// catalogFromV3 供下游判断当前目录是否已是 v3 主源（避免把 v3 全量再 merge 进来混入非 cli 模型）。
+func catalogFromV3() bool {
+	cache.mu.RLock()
+	defer cache.mu.RUnlock()
+	return cache.fromV3
 }
 
 const catalogTTL = 10 * time.Minute
@@ -83,6 +93,11 @@ const catalogTTL = 10 * time.Minute
 var cache catalogCache
 
 // fetchCatalog 拉取目录（带 10 分钟缓存），返回 cli agent 过滤后的模型列表。
+//
+// 主源 v2 /v2/enterprises/personal/models；v2 自 2026-11-17 起下游改版 404 下线，
+// 此时**转用 v3 /v3/config 为主源**（而非返回错误）——v3 是完整超集（28 模型、
+// cli agent 26 项定序、全部带 credits/能力字段），足以独立撑起模型清单与费率。
+// 降级路径仍保留：v3 也失败才返回错误（上游彻底不可用）。
 func (c *Client) fetchCatalog(a *auth.Auth) ([]catalogModel, error) {
 	cache.mu.RLock()
 	if len(cache.models) > 0 && time.Since(cache.fetched) < catalogTTL {
@@ -101,19 +116,20 @@ func (c *Client) fetchCatalog(a *auth.Auth) ([]catalogModel, error) {
 	req.Header.Set("Accept", "application/json")
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return nil, err
+		// 网络层失败：v2 不可达，尝试 v3 主源
+		return c.fetchCatalogFromV3(a, fmt.Sprintf("v2 transport: %v", err))
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("models api status %d: %s", resp.StatusCode, truncate(string(raw), 120))
+		return c.fetchCatalogFromV3(a, fmt.Sprintf("v2 status %d", resp.StatusCode))
 	}
 	var env catalogResp
 	if err := json.Unmarshal(raw, &env); err != nil {
-		return nil, fmt.Errorf("models parse: %w", err)
+		return c.fetchCatalogFromV3(a, fmt.Sprintf("v2 parse: %v", err))
 	}
 	if env.Code != 0 {
-		return nil, fmt.Errorf("models api code=%d", env.Code)
+		return c.fetchCatalogFromV3(a, fmt.Sprintf("v2 code=%d", env.Code))
 	}
 
 	// cli agent 的模型 ID 顺序为准；models[] 提供元数据。
@@ -125,7 +141,7 @@ func (c *Client) fetchCatalog(a *auth.Auth) ([]catalogModel, error) {
 		}
 	}
 	if len(cliIDs) == 0 {
-		return nil, fmt.Errorf("models api: no cli agent models")
+		return c.fetchCatalogFromV3(a, "v2 no cli agent models")
 	}
 	byID := make(map[string]catalogModel, len(env.Data.Models))
 	for _, m := range env.Data.Models {
@@ -143,14 +159,52 @@ func (c *Client) fetchCatalog(a *auth.Auth) ([]catalogModel, error) {
 		out = append(out, m)
 	}
 	if len(out) == 0 {
-		return nil, fmt.Errorf("models api: empty cli list")
+		return c.fetchCatalogFromV3(a, "v2 empty cli list")
 	}
 
 	// 促销折扣：factor==0 表示当前免费；badge 供费率面板备注。
+	promo, badges, colors := extractPromos(env.Data.ModelPromotions)
+
+	cache.mu.Lock()
+	cache.models, cache.promo, cache.badges, cache.colors, cache.fetched = out, promo, badges, colors, time.Now()
+	cache.fromV3 = false
+	cache.mu.Unlock()
+	return out, nil
+}
+
+// fetchCatalogFromV3 在 v2 不可用时把 v3 提升为主源：复用 buildV3Catalog 的
+// cli 定序结果写入 cache.models（10 分钟内不再重试已死的 v2），返回主源目录。
+// v3 无 modelPromotions（其 credits 已是活动后实际倍率），promo/badges 置空。
+func (c *Client) fetchCatalogFromV3(a *auth.Auth, why string) ([]catalogModel, error) {
+	out, err := c.buildV3Catalog(a)
+	if err != nil {
+		// v2、v3 都不可用：返回 v3 的错误（更接近当前上游真实状态）
+		return nil, fmt.Errorf("%s; v3 fallback also failed: %w", why, err)
+	}
+	log.Printf("workbuddyai catalog using v3 as primary (%s, %d models)", why, len(out))
+	cache.mu.Lock()
+	cache.models, cache.promo, cache.badges, cache.colors, cache.fetched = out, map[string]float64{}, map[string]string{}, map[string]string{}, time.Now()
+	cache.fromV3 = true
+	cache.mu.Unlock()
+	return out, nil
+}
+
+// extractPromos 从 v2 目录的 modelPromotions 抽促销倍率/标签/颜色。
+func extractPromos(ps []struct {
+	Enabled  bool     `json:"enabled"`
+	Model    []string `json:"modelIds"`
+	Discount struct {
+		Factor float64 `json:"factor"`
+	} `json:"discount"`
+	Badge struct {
+		Label string `json:"label"`
+		Color string `json:"color"`
+	} `json:"badge"`
+}) (map[string]float64, map[string]string, map[string]string) {
 	promo := make(map[string]float64)
 	badges := make(map[string]string)
 	colors := make(map[string]string)
-	for _, p := range env.Data.ModelPromotions {
+	for _, p := range ps {
 		if !p.Enabled {
 			continue
 		}
@@ -164,12 +218,7 @@ func (c *Client) fetchCatalog(a *auth.Auth) ([]catalogModel, error) {
 			}
 		}
 	}
-	_ = badges
-
-	cache.mu.Lock()
-	cache.models, cache.promo, cache.badges, cache.colors, cache.fetched = out, promo, badges, colors, time.Now()
-	cache.mu.Unlock()
-	return out, nil
+	return promo, badges, colors
 }
 
 // fetchV3Catalog 抓取 /v3/config 全量模型面（2026-09-28 实测，issue #39）。
@@ -220,10 +269,57 @@ func (c *Client) fetchV3Catalog(a *auth.Auth) ([]catalogModel, error) {
 		return nil, fmt.Errorf("v3 config empty models")
 	}
 
+	// cli agent 权威定序（v2 下线后作主源）；与 v2 的 fetchCatalog 同口径。
+	var cliIDs []string
+	for _, ag := range env.Data.Agents {
+		if ag.Name == "cli" {
+			cliIDs = ag.Models
+			break
+		}
+	}
+
 	cache.mu.Lock()
 	cache.v3, cache.v3OK, cache.v3Fetched = env.Data.Models, true, time.Now()
+	cache.v3CLIIDs = cliIDs
 	cache.mu.Unlock()
 	return env.Data.Models, nil
+}
+
+// buildV3Catalog 把 v3 全量模型提升为主源目录：按 cli agent 顺序定序，
+// 用 models[] 补全元数据；v3 里没有 cli 顺序时退回全量（下游仍会过滤 non-LLM）。
+// 供 fetchCatalog 在 v2 不可用时调用——v3 是被设计成「尽力增强」的源，
+// 但 v2 自 2026-11-17 起 404 下线后，v3 实际成了唯一可用源，必须能独立撑起主路。
+func (c *Client) buildV3Catalog(a *auth.Auth) ([]catalogModel, error) {
+	v3, err := c.fetchV3Catalog(a)
+	if err != nil {
+		return nil, err
+	}
+	cache.mu.RLock()
+	cliIDs := append([]string(nil), cache.v3CLIIDs...)
+	cache.mu.RUnlock()
+	if len(cliIDs) == 0 {
+		// 无 cli 定序：退回 v3 全量（下游 brokenModels/缺 credits 过滤照常）
+		return v3, nil
+	}
+	byID := make(map[string]catalogModel, len(v3))
+	for _, m := range v3 {
+		byID[m.ID] = m
+	}
+	out := make([]catalogModel, 0, len(cliIDs))
+	for _, id := range cliIDs {
+		m, ok := byID[id]
+		if !ok {
+			m = catalogModel{ID: id, Name: id}
+		}
+		if m.Name == "" {
+			m.Name = id
+		}
+		out = append(out, m)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("v3 catalog: empty cli list")
+	}
+	return out, nil
 }
 
 // mergeV3 合并 v3 目录：v2 为主序与主数据源，v3 只补 v2 缺失的 id；

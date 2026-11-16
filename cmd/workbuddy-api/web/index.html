@@ -163,7 +163,7 @@
           title="默认只列出上游给了倍率的模型。打开后把没有倍率的内部/子代理模型也一并显示（它们照常可调用，只是无倍率可比价）">显示隐藏模型</button>
         <button class="btn small" id="btnRefreshFees">刷新</button>
         <button class="btn small" id="btnExportModels"
-          title="把当前全部「有明确费率」的模型写入 WorkBuddy 客户端的 ~/.workbuddy/models.json 自定义模型清单。这是客户端侧模型清单，不是网关的「模型路由」；写入前会预览并备份原文件。">写入 WorkBuddy 模型清单</button>
+          title="导出当前渠道的模型名称（格式：渠道/模型名 (倍率x)，可直接粘贴到客户端用）。弹窗内可一键复制或下载 .txt，也能切换到全部渠道。">导出模型名称</button>
       </div>
     </div>
     <div id="feesBox" class="fees"></div>
@@ -172,16 +172,22 @@
   <div class="footer">workbuddy-api — 多渠道账号聚合 · 仅供个人学习 · 右键托盘图标退出</div>
 </div>
 
-<!-- 一键添加自定义模型：覆盖确认弹层 -->
-<div class="overlay hidden" id="modelsJsonOverlay">
-  <div class="modal">
-    <div class="modal-title">写入 WorkBuddy 自定义模型清单</div>
+<!-- 导出模型名称：展示可复制清单 + 下载 .txt（替代原「写入 models.json」弹层） -->
+<div class="overlay hidden" id="exportModelsOverlay">
+  <div class="modal modal-wide">
+    <div class="modal-title" id="exportModelsTitle">导出模型名称</div>
     <div class="modal-body">
-      <div id="mjMsg"></div>
+      <div class="export-scope">
+        <button class="btn small on" id="btnExportScopeActive">当前渠道</button>
+        <button class="btn small" id="btnExportScopeAll">全部渠道</button>
+      </div>
+      <div class="hint" id="exportModelsHint"></div>
+      <textarea id="exportModelsText" class="export-models-text" readonly spellcheck="false"></textarea>
     </div>
     <div class="modal-actions">
-      <button class="btn small" id="btnMjCancel">取消</button>
-      <button class="btn small primary" id="btnMjConfirm">确认写入</button>
+      <button class="btn small" id="btnExportClose">关闭</button>
+      <button class="btn small" id="btnExportDownload">下载 .txt</button>
+      <button class="btn small primary" id="btnExportCopy">复制全部</button>
     </div>
   </div>
 </div>
@@ -425,6 +431,13 @@
             右边写真实要走的 <code>渠道/模型名</code>。<br>
             例：<code>my-cheap-code = glm/glm-5.2</code>；通配：<code>claude-* = workbuddy/glm-5.2</code>。
             这里创建的是「固定走某一个模型」的别名；若要让多个渠道候选自动切换，用下方的「多候选自定义模型」。
+          </div>
+          <div class="hint" style="margin-bottom:8px;padding:8px 10px;border-left:2px solid var(--info);background:var(--bg-soft,rgba(0,0,0,.03))">
+            <b>「模型名」怎么填？</b> 别猜、别手敲——用下方输入框的<b>下拉候选</b>直接选，那里列出的是各渠道当前真实可用的模型名（含费率），选中的就是正确写法。<br>
+            · <b>渠道名</b>固定是这几种：<code>workbuddy</code>、<code>traework</code>、<code>traecode</code>、<code>qodercn</code>、<code>workbuddyai</code>、<code>raccoon</code>（小浣熊）、<code>glm</code>、<code>qwenwork</code>。<br>
+            · <b>小浣熊模型</b>要保持 <code>sn-</code> 前缀，如 <code>raccoon/sn-sensenova-6-8-flash</code>、<code>raccoon/sn-glm-5-3-flash</code>；去掉前缀会被上游当成未知模型。<br>
+            · <b>其余渠道</b>用裸名即可，如 <code>workbuddy/glm-5.2</code>、<code>qodercn/kimi-k3</code>。<br>
+            · 不确定就点开「费率」页看模型清单，或从上方下拉候选中选一个。
           </div>
           <div class="hint" style="margin-bottom:4px">也可以用下方引导式表单添加一条别名：</div>
           <div class="row">

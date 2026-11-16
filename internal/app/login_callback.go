@@ -23,7 +23,9 @@ import (
 // 授权服务器拒绝（且会把回调端口暴露到局域网）。这里做的是**把那条 URL 交回给人**：
 // 面板提示用户复制地址栏内容粘回来，程序按与自动回调完全相同的解析/落盘路径处理。
 //
-// 受影响范围：仅 qwenwork 与 traework/traecode（源码里用本机回调）。
+// 受影响范围：traework/traecode（源码里用本机回调）。
+// qwenwork 已改用 device flow（poll 轮询直接换 token，无需回调/粘贴），本文件保留其
+// 分支仅为兼容历史 API 调用，正常登录流程不会再走到这里。
 // qoder / qodercn / qodercom 走设备码轮询、智谱清言走 CDP 或手工粘 Cookie、
 // 小浣熊走协议深链、MonkeyCode / Loomy 从本机客户端导入 —— 都不依赖跨机回调，不受影响。
 
