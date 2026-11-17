@@ -661,9 +661,13 @@ function renderAccounts() {
           <span class="icon-op warn" title="${disableTitle}" onclick="toggleDisable('${a.uid}',${a.disabled})">${disableIcon}</span>
           <span class="icon-op danger" title="删除账号" onclick="removeAcct('${a.uid}')">✕</span>`;
     // 显示名：点击直接弹出改名框（无积分渠道降级为普通文本）。
-    const nameHtml = (noCredits || isCustom)
+    const nameHtml = isCustom
+      // 自定义渠道的「名字」就是配置项名，改它很安全（模型前缀是 customopenai/<model>，
+      // 不含实例名），所以允许点开改名，省得每次都要重新加一条。
+      ? `<span class="acct-name editable" title="点击改名（重启生效）" onclick="renameCustomChannel('${a.uid}')">${esc(a.nickname || shortUid(a.uid))}</span>`
+      : (noCredits
       ? `<span class="acct-name">${esc(a.nickname || shortUid(a.uid))}</span>`
-      : `<span class="acct-name editable" title="点击修改显示名" onclick="openRename('${a.uid}','${esc(a.nickname || shortUid(a.uid)).replace(/'/g, "&#39;")}')">${esc(a.nickname || shortUid(a.uid))}</span>`;
+      : `<span class="acct-name editable" title="点击修改显示名" onclick="openRename('${a.uid}','${esc(a.nickname || shortUid(a.uid)).replace(/'/g, "&#39;")}')">${esc(a.nickname || shortUid(a.uid))}</span>`);
 
     // 「调用中 / 最近用过」徽标。HTML 由 liveTagHtml 统一生成，
     // renderAccounts 与 pollInUse 共用，避免两处写法漂移。
@@ -2237,12 +2241,12 @@ const WEBAPI_SOURCES = [
     // 四个平台各自一套模型。电脑端点选平台即可，不必知道模型名——
     // 这里照搬同样的体验：选平台 → 自动填模型；想知道上游真实清单再点「拉取模型」。
     platforms: [
-      { id: "all", label: "全部平台（DeepSeek + 智谱 + Kimi + 通义）",
+      { id: "all", label: "全部平台（DeepSeek + 智谱 + Kimi + 通义）", site: "",
         models: ["deepseek-chat", "deepseek-reasoner", "GLM-5.3", "kimi-k3", "qwen3.7-plus"] },
-      { id: "deepseek", label: "DeepSeek（对话 / 推理）", models: ["deepseek-chat", "deepseek-reasoner"] },
-      { id: "glm", label: "智谱 GLM", models: ["GLM-5.3"] },
-      { id: "kimi", label: "月之暗面 Kimi", models: ["kimi-k3"] },
-      { id: "qwen", label: "通义千问", models: ["qwen3.7-plus"] },
+      { id: "deepseek", label: "DeepSeek（对话 / 推理）", site: "https://chat.deepseek.com", models: ["deepseek-chat", "deepseek-reasoner"] },
+      { id: "glm", label: "智谱 GLM", site: "https://chatglm.cn", models: ["GLM-5.3"] },
+      { id: "kimi", label: "月之暗面 Kimi", site: "https://www.kimi.com", models: ["kimi-k3"] },
+      { id: "qwen", label: "通义千问", site: "https://chat.qwen.ai", models: ["qwen3.7-plus"] },
     ],
     alt: "跑在电脑上时把 127.0.0.1 换成电脑局域网 IP（如 192.168.1.50:8800）",
     repo: "https://github.com/duruoxian/webai2api",
@@ -2314,6 +2318,8 @@ function renderWebAPICards() {
         ${s.recommend ? '<span class="badge rec">推荐先用</span>' : ""}
       </div>
       <div class="hint" style="margin:2px 0 6px">${esc(s.tagline)}</div>
+      <details class="wa-info">
+        <summary class="hint">展开看部署方式 / 登录方式 / 项目地址 / 详细步骤</summary>
       <div class="wa-kv"><span>跑在哪</span><div>${esc(s.where)}</div></div>
       <div class="wa-kv"><span>接口地址</span><div><code>${esc(s.base)}</code><br><span class="hint">${esc(s.alt)}</span></div></div>
       <div class="wa-kv"><span>API Key</span><div>${esc(s.keyHint)}</div></div>
@@ -2336,6 +2342,7 @@ function renderWebAPICards() {
       <div class="wa-kv"><span>怎么做</span><div>
         <ol class="wa-steps">${(s.steps || []).map((t) => `<li>${esc(t)}</li>`).join("")}</ol>
       </div></div>
+      </details>
       <div class="row" style="margin-top:8px">
         <button type="button" class="btn small primary wa-open">接入这个源</button>
       </div>
@@ -2360,6 +2367,7 @@ function renderWebAPICards() {
               <option value="qwen">通义千问</option>
             </select>
           </div>
+          <div class="hint wa-login-hint" style="margin-top:4px">「全部平台」会带上四个平台的模型，但上游只对<b>已登录</b>的平台可用。</div>
           <div class="row" style="margin-top:6px">
             <label class="lbl wide">账号名</label>
             <input class="input grow" data-f="accname" value="我的dsh" spellcheck="false">
@@ -2467,6 +2475,12 @@ function bindWebAPIEvents() {
       const idx = parseInt(e.target.value, 10) || 0;
       const pf = src2.platforms && src2.platforms[idx];
       if (pf) {
+        const hint = card.querySelector(".wa-login-hint");
+        if (hint) {
+          hint.innerHTML = pf.site
+            ? `该平台要先在 <a href="${esc(pf.site)}" target="_blank" rel="noreferrer">${esc(pf.site)}</a> 登录，再用书签复制凭证（书签目前只适配 DeepSeek，其他平台请按其官方文档取 token/cookie）。`
+            : `「全部平台」会带上四个平台的模型，但上游只对<b>已登录</b>的平台可用；想加哪个平台就先把平台选成它再导入。`;
+        }
         card.querySelector('[data-f="models"]').value = pf.models.join(", ");
         const msg = card.querySelector(".wa-probe-msg");
         if (msg) msg.textContent = pf.id === "all"
@@ -2641,6 +2655,19 @@ function importCustomJSON() {
 // toggleCustomFrozen 冻结/启用某个自定义渠道（写 config，重启生效）。
 // 虚拟账号没有 auth 文件，停用不能走 /api/accounts/disable（那条只改内存池，
 // 重启就复位），必须落到配置里才会持久。
+// renameCustomChannel 改自定义渠道的名字（=配置项名，同时是账号 UID）。
+// 安全：模型前缀是 customopenai/<model>，与实例名无关，所以改名不影响客户端调用。
+async function renameCustomChannel(oldName) {
+  const cur = await fetchChannels();
+  const c = cur.find((x) => x.name === oldName);
+  if (!c) { toast("配置里找不到这条渠道，请刷新后重试", 6000); return; }
+  const nn = (prompt("新的名字（同时作为 UID，重启后生效）", oldName) || "").trim();
+  if (!nn || nn === oldName) return;
+  if (cur.some((x) => x.name === nn)) { toast(`「${nn}」已存在`, 6000); return; }
+  c.name = nn;
+  await postChannels(cur, `已改名为「${nn}」，重启网关后生效`);
+}
+
 async function toggleCustomFrozen(name) {
   const list = await fetchChannels();
   const i = list.findIndex((c) => c.name === name);

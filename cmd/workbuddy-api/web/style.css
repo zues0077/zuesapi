@@ -1094,3 +1094,7 @@ code.about-repo:active { transform: translateY(1px); }
 .badge.rec { background: #2563eb; }
 .wa-steps { margin: 2px 0 0; padding-left: 18px; font-size: 12px; line-height: 1.75; }
 .wa-steps li { margin-bottom: 2px; }
+
+/* WebAPI 卡片：部署/登录等长说明默认折叠，只留一句简介 */
+.wa-info { margin: 2px 0 0; }
+.wa-info > summary { cursor: pointer; color: var(--primary); }
