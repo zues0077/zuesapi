@@ -664,7 +664,7 @@ function renderAccounts() {
     const nameHtml = isCustom
       // 自定义渠道的「名字」就是配置项名，改它很安全（模型前缀是 customopenai/<model>，
       // 不含实例名），所以允许点开改名，省得每次都要重新加一条。
-      ? `<span class="acct-name editable" title="点击改名（重启生效）" onclick="renameCustomChannel('${a.uid}')">${esc(a.nickname || shortUid(a.uid))}</span>`
+      ? `<span class="acct-name editable" title="点击改名（即时生效）" onclick="renameCustomChannel('${a.uid}')">${esc(a.nickname || shortUid(a.uid))}</span>`
       : (noCredits
       ? `<span class="acct-name">${esc(a.nickname || shortUid(a.uid))}</span>`
       : `<span class="acct-name editable" title="点击修改显示名" onclick="openRename('${a.uid}','${esc(a.nickname || shortUid(a.uid)).replace(/'/g, "&#39;")}')">${esc(a.nickname || shortUid(a.uid))}</span>`);
@@ -2199,7 +2199,7 @@ async function addCustomChannel() {
 
 async function removeCustomChannel(name) {
   const next = (state.custom_channels || []).filter((c) => c.name !== name);
-  await saveCustomChannels(next, `已删除「${name}」，重启网关后生效`);
+  await saveCustomChannels(next, `已删除「${name}」，已即时生效`);
 }
 
 // ---------- WebAPI 接入（网页版模型 → OpenAI 接口）----------
@@ -2348,6 +2348,11 @@ function renderWebAPICards() {
         <button type="button" class="btn small primary wa-open">接入这个源</button>
       </div>
       <div class="wa-form hidden">
+        <div class="row" style="margin-top:10px">
+          <label class="lbl wide">名称</label>
+          <input class="input grow" data-f="name" value="${esc(s.id)}" spellcheck="false"
+                 placeholder="这条渠道在网关里的名字（也是账号 UID），随便起，如 我的deepseek">
+        </div>
         ${s.importCred ? `<details class="wa-adv" style="margin-top:8px" open>
           <summary class="hint"><b>① 导入平台账号</b>（还没登录过才需要；已登录可跳过直接填下面的 api_key）</summary>
           <div class="row" style="margin-top:6px">
@@ -2370,7 +2375,7 @@ function renderWebAPICards() {
           </div>
           <div class="hint wa-login-hint" style="margin-top:4px">「全部平台」会带上四个平台的模型，但上游只对<b>已登录</b>的平台可用。</div>
           <div class="row" style="margin-top:6px">
-            <label class="lbl wide">账号名</label>
+            <label class="lbl wide">平台账号名</label>
             <input class="input grow" data-f="accname" value="我的dsh" spellcheck="false">
           </div>
           <div class="row" style="margin-top:6px">
@@ -2416,10 +2421,6 @@ function renderWebAPICards() {
         </div>
         <details class="wa-adv" style="margin-top:6px">
           <summary class="hint">高级设置（名称 / 平台 / 模型 / 并发）—— 不改也能用</summary>
-          <div class="row" style="margin-top:6px">
-            <label class="lbl wide">名称</label>
-            <input class="input grow" data-f="name" value="${esc(s.id)}" spellcheck="false">
-          </div>
           ${s.platforms ? `<div class="row" style="margin-top:6px">
             <label class="lbl wide">平台</label>
             <select class="input grow wa-plat">
@@ -2621,7 +2622,7 @@ function bindWebAPIEvents() {
       name, base_url: src.base.replace(/\/+$/, ""), api_key: key,
       models, rate: 0, max_concurrency: conc, tag: "webapi",
     });
-    await postChannels(list, `已添加 webAPI 账号「${name}」，重启网关后生效`);
+    await postChannels(list, `已添加 webAPI 账号「${name}」，已即时生效`);
     closeWebAPI();
   };
 }
@@ -2670,7 +2671,7 @@ async function renameCustomChannel(oldName) {
   if (!nn || nn === oldName) return;
   if (cur.some((x) => x.name === nn)) { toast(`「${nn}」已存在`, 6000); return; }
   c.name = nn;
-  await postChannels(cur, `已改名为「${nn}」，重启网关后生效`);
+  await postChannels(cur, `已改名为「${nn}」，已即时生效`);
 }
 
 async function toggleCustomFrozen(name) {
@@ -2679,8 +2680,8 @@ async function toggleCustomFrozen(name) {
   if (i < 0) { toast(`配置里找不到「${name}」，请刷新页面后重试`, 6000); return; }
   list[i] = Object.assign({}, list[i], { disabled: !list[i].disabled });
   await postChannels(list, list[i].disabled
-    ? `已冻结「${name}」，重启网关后不再参与调用`
-    : `已启用「${name}」，重启网关后恢复调用`);
+    ? `已冻结「${name}」，已即时生效（不再参与调用）`
+    : `已启用「${name}」，已即时生效（恢复调用）`);
 }
 
 // removeCustomChannel 删除整条自定义渠道配置。

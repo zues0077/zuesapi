@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"workbuddy-api/internal/auth"
@@ -129,8 +130,13 @@ type stickyEntry struct {
 
 // Handler 主路由。
 type Handler struct {
-	cfg Config
-	mux *http.ServeMux
+
+	// rtPtr 运行时表的原子快照。自定义渠道保存后需要**热替换**运行时，
+	// 而请求路径上多处直接读 cfg.Runtimes；直接改 map 会与读并发冲突（map 并发读写
+	// 直接 fatal），所以改成「整表替换 + 原子指针读取」。
+	rtPtr atomic.Pointer[map[provider.Kind]*Runtime]
+	cfg   Config
+	mux   *http.ServeMux
 
 	ledger *ledger.Ledger     // 记账器（cfg.Ledger 透传，nil = 不记账）
 	stats  *statsEngine.Stats // 运行统计引擎（cfg.Stats 透传，nil = 不插桩）
@@ -275,7 +281,7 @@ func (h *Handler) pickWithSticky(rt *Runtime, model string) *auth.Auth {
 // healthyUIDs 某渠道下可用（healthy 且对该模型未冷却）的账号 uid 列表。
 // model 为空表示不按模型过滤。渠道名未知时返回空。
 func (h *Handler) healthyUIDs(channel, model string) []string {
-	rt := h.cfg.Runtimes[provider.Kind(channel)]
+	rt := h.runtimes()[provider.Kind(channel)]
 	if rt == nil || rt.Pool == nil {
 		return nil
 	}
@@ -463,7 +469,7 @@ func (h *Handler) healthz(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 	accounts := map[string]any{}
 	for _, k := range h.runtimeKinds() {
-		rt := h.cfg.Runtimes[k]
+		rt := h.runtimes()[k]
 		accounts[k.String()] = rt.Pool.List()
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"accounts": accounts})
@@ -515,7 +521,7 @@ func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) modelList() []map[string]any {
 	out := []map[string]any{}
 	for _, k := range h.runtimeKinds() {
-		rt := h.cfg.Runtimes[k]
+		rt := h.runtimes()[k]
 		if rt.Pool == nil || len(rt.Pool.List()) == 0 { // 只暴露已接入账号的平台
 			continue
 		}
@@ -673,8 +679,8 @@ func (rt *Runtime) setHealthLocked(h provider.ChannelHealth) {
 
 // ChannelHealth 各渠道最近一次模型列表拉取的健康度（bv展用），不触发网络请求。
 func (h *Handler) ChannelHealth() map[provider.Kind]provider.ChannelHealth {
-	out := make(map[provider.Kind]provider.ChannelHealth, len(h.cfg.Runtimes))
-	for k, rt := range h.cfg.Runtimes {
+	out := make(map[provider.Kind]provider.ChannelHealth, len(h.runtimes()))
+	for k, rt := range h.runtimes() {
 		if rt == nil || rt.Pool == nil || len(rt.Pool.List()) == 0 {
 			continue
 		}
@@ -1194,7 +1200,7 @@ func (h *Handler) runtimeForModel(model string) (*Runtime, string, error) {
 		return nil, "", fmt.Errorf("model must use explicit prefix: workbuddy/<model> / workbuddyai/<model> / traework/<model> / qoder/<model> / qodercn/<model> / qodercom/<model> / qwenwork/<model> / glm/<model>")
 	}
 	kind := provider.Kind(parts[0])
-	rt := h.cfg.Runtimes[kind]
+	rt := h.runtimes()[kind]
 	if rt == nil || rt.Pool == nil || rt.Upstream == nil {
 		return nil, "", fmt.Errorf("provider %q is not configured", kind)
 	}
@@ -1355,9 +1361,9 @@ func normalizeToolTurnContent(obj map[string]any) {
 // 供管理端（费率面板）复用，保证「模型列表」与「模型费率」基于同一份清单。
 // 注意：会触发上游网络请求（fetchRuntimeModels），费控面板场景用 CachedChannelModels 避免阻塞。
 func (h *Handler) ChannelModels() map[provider.Kind][]provider.ModelInfo {
-	out := make(map[provider.Kind][]provider.ModelInfo, len(h.cfg.Runtimes))
+	out := make(map[provider.Kind][]provider.ModelInfo, len(h.runtimes()))
 	for _, k := range h.runtimeKinds() {
-		rt := h.cfg.Runtimes[k]
+		rt := h.runtimes()[k]
 		if rt == nil || rt.Pool == nil || len(rt.Pool.List()) == 0 {
 			continue
 		}
@@ -1373,9 +1379,9 @@ func (h *Handler) ChannelModels() map[provider.Kind][]provider.ModelInfo {
 // CachedChannelModels 返回各渠道生效的模型列表，仅用内存缓存/静态兜底，不触发上游网络请求。
 // 供费控面板等需要即时返回的场景使用（后台刷新比用户点面板快）。
 func (h *Handler) CachedChannelModels() map[provider.Kind][]provider.ModelInfo {
-	out := make(map[provider.Kind][]provider.ModelInfo, len(h.cfg.Runtimes))
+	out := make(map[provider.Kind][]provider.ModelInfo, len(h.runtimes()))
 	for _, k := range h.runtimeKinds() {
-		rt := h.cfg.Runtimes[k]
+		rt := h.runtimes()[k]
 		if rt == nil || rt.Pool == nil || len(rt.Pool.List()) == 0 {
 			continue
 		}
@@ -1404,7 +1410,7 @@ func (h *Handler) InvalidateModels() {
 	dynamicModelsCache.fetched = time.Time{}
 	dynamicModelsCache.lastFail = time.Time{}
 	dynamicModelsCache.Unlock()
-	for _, rt := range h.cfg.Runtimes {
+	for _, rt := range h.runtimes() {
 		if rt == nil {
 			continue
 		}
@@ -1417,8 +1423,8 @@ func (h *Handler) InvalidateModels() {
 }
 
 func (h *Handler) runtimeKinds() []provider.Kind {
-	ks := make([]provider.Kind, 0, len(h.cfg.Runtimes))
-	for k := range h.cfg.Runtimes {
+	ks := make([]provider.Kind, 0, len(h.runtimes()))
+	for k := range h.runtimes() {
 		ks = append(ks, k)
 	}
 	sort.Slice(ks, func(i, j int) bool { return ks[i] < ks[j] })
@@ -1580,3 +1586,35 @@ func TraeCodeStaticModels() []provider.ModelInfo {
 
 // WorkBuddyAIStaticModels 国际版静态模型表实际定义在 internal/workbuddyai 包，
 // 由 cmd 直接引用 workbuddyai.StaticModels()，此处不再重复。
+
+// runtimes 返回当前运行时表快照（原子读，安全并发）。
+func (h *Handler) runtimes() map[provider.Kind]*Runtime {
+	if p := h.rtPtr.Load(); p != nil {
+		return *p
+	}
+	return h.cfg.Runtimes
+}
+
+// SetRuntime 热替换（或新增）某个渠道的运行时。
+// 做法是复制整表再原子换指针，读侧永远看到一致的表；正在处理中的请求继续用旧 runtime。
+func (h *Handler) SetRuntime(kind provider.Kind, rt *Runtime) {
+	cur := h.runtimes()
+	next := make(map[provider.Kind]*Runtime, len(cur)+1)
+	for k, v := range cur {
+		next[k] = v
+	}
+	next[kind] = rt
+	h.rtPtr.Store(&next)
+}
+
+// DeleteRuntime 移除某个渠道的运行时（配置被清空时用）。
+func (h *Handler) DeleteRuntime(kind provider.Kind) {
+	cur := h.runtimes()
+	next := make(map[provider.Kind]*Runtime, len(cur))
+	for k, v := range cur {
+		if k != kind {
+			next[k] = v
+		}
+	}
+	h.rtPtr.Store(&next)
+}

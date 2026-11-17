@@ -4,6 +4,7 @@ package app
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -2205,8 +2206,99 @@ func (a *App) SetCustomChannels(channels []config.CustomChannel) error {
 	if err != nil {
 		return err
 	}
-	log.Printf("自定义渠道配置已保存：%d 个实例（重启后生效）", len(clean))
+	log.Printf("自定义渠道配置已保存：%d 个实例", len(clean))
+	a.applyCustomChannels(clean) // 立即生效，不用重启
 	return nil
+}
+
+// applyCustomChannels 按最新配置重建 customopenai 运行时并热替换（无需重启）。
+//
+// 为什么需要：自定义渠道的池/上游原本只在启动时装配，面板加一条就要重启一次，
+// 用户实测「每次添加都要重启比较麻烦」。这里把同一套装配逻辑搬到运行期，
+// 重建后同时替换 app 侧与路由层(server) 的 runtime —— 两边必须一起换，
+// 否则会出现「面板有、调用找不到」的分裂。
+//
+// 并发：请求路径读的是 server 的原子快照（SetRuntime 内部整表替换），
+// 正在处理中的请求继续用旧 runtime，新请求走新的。
+func (a *App) applyCustomChannels(channels []config.CustomChannel) {
+	if len(channels) == 0 {
+		a.mu.Lock()
+		delete(a.runtimes, provider.CustomOpenAI)
+		a.mu.Unlock()
+		if a.handler != nil {
+			a.handler.DeleteRuntime(provider.CustomOpenAI)
+		}
+		log.Printf("自定义渠道已清空，运行时已移除")
+		return
+	}
+
+	// 传输层：与启动时同构（禁 h2 + 连接池 + 超时），并沿用 customopenai 的代理配置。
+	tr := &http.Transport{
+		DialContext:           (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 15 * time.Second}).DialContext,
+		TLSNextProto:          make(map[string]func(string, *tls.Conn) http.RoundTripper),
+		TLSHandshakeTimeout:   10 * time.Second,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   20,
+		IdleConnTimeout:       60 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+	if raw := strings.TrimSpace(a.cfg.Proxies[provider.CustomOpenAI.String()]); raw != "" {
+		if u, err := url.Parse(raw); err == nil && u.Scheme != "" && u.Host != "" {
+			tr.Proxy = http.ProxyURL(u)
+		}
+	}
+
+	up := customopenai.New()
+	up.HTTP = &http.Client{Timeout: time.Duration(a.cfg.Upstream.TimeoutSeconds) * time.Second, Transport: tr}
+	// 流式 client 不能带总超时，否则长回答会被掐断（与启动装配同一约定）。
+	up.StreamHTTP = &http.Client{Transport: tr}
+
+	neverExpire := time.Now().AddDate(100, 0, 0).Unix()
+	pl := pool.New("") // 虚拟账号不持久化
+	var static []provider.ModelInfo
+	for _, cc := range channels {
+		au := &auth.Auth{
+			Kind:        provider.CustomOpenAI.String(),
+			UID:         cc.Name,
+			ApiHost:     cc.BaseURL,
+			AccessToken: cc.APIKey,
+			ExpiresAt:   neverExpire,
+			Models:      append([]string(nil), cc.Models...),
+		}
+		pl.Add(au)
+		if cc.Disabled {
+			pl.Disable(cc.Name, "已冻结（面板设置）")
+		}
+		up.RegisterInstance(cc.Name, cc.Models, cc.Rate, cc.MaxConcurrency)
+		for _, m := range cc.Models {
+			if m = strings.TrimSpace(m); m != "" {
+				static = append(static, provider.ModelInfo{ID: m, Name: m})
+			}
+		}
+	}
+
+	a.mu.Lock()
+	a.runtimes[provider.CustomOpenAI] = &Runtime{
+		Kind: provider.CustomOpenAI, Pool: pl, Upstream: up,
+	}
+	a.mu.Unlock()
+	if a.handler != nil {
+		a.handler.SetRuntime(provider.CustomOpenAI, &server.Runtime{
+			Kind: provider.CustomOpenAI, Pool: pl, Upstream: up, StaticModels: static,
+		})
+	}
+	log.Printf("自定义渠道运行时已热重建：%d 个实例（含冻结 %d 个）", len(channels), countDisabled(channels))
+}
+
+// countDisabled 统计冻结实例数（仅用于日志）。
+func countDisabled(chs []config.CustomChannel) int {
+	n := 0
+	for _, c := range chs {
+		if c.Disabled {
+			n++
+		}
+	}
+	return n
 }
 
 // SetAccountNickname 修改账号显示名：写回 auth 文件 + 池内即时生效。
@@ -2991,7 +3083,7 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 			apiError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "restart_required": true})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "restart_required": false})
 	})
 	// 拉取自定义渠道对端的模型列表（面板「拉取模型」用）。
 	//
