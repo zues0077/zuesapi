@@ -1,0 +1,49 @@
+{
+  "listen": {
+    "host": "127.0.0.1",
+    "port": 7863
+  },
+  "public_url": "",
+  "api_key": "YOUR_API_KEY",
+  "admin_password": "",
+  "auth_dir": "./auths",
+  "state_file": "./data/state.json",
+  "region": "cn",
+  "session_sticky": true,
+  "strategy": "expire",
+  "max_rotate": 3,
+  "cooldown": {
+    "hard_credit": "12h",
+    "soft_rate": "60s",
+    "err_threshold": 5,
+    "err_cooldown": "10m"
+  },
+  "schedule": {
+    "checkin_times": ["09:00", "21:00"],
+    "keepalive_hours": [22],
+    "expiring_threshold_hours": 24
+  },
+  "upstream": {
+    "timeout_seconds": 120
+  },
+  "compat": {
+    "default_channel": "workbuddy",
+    "max_tokens_cap": 32000,
+    "model_map": {
+      "claude-*": "workbuddy/glm-5.2",
+      "gpt-5*": "workbuddy/deepseek-v4-pro"
+    }
+  },
+  "proxies": {
+  },
+  "custom_channels": [
+    {
+      "name": "my中转",
+      "base_url": "http://127.0.0.1:8800/v1",
+      "api_key": "sk-xxx",
+      "models": ["model-a", "model-b"],
+      "rate": 0,
+      "max_concurrency": 0
+    }
+  ]
+}
