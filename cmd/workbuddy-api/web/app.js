@@ -649,8 +649,10 @@ function renderAccounts() {
     // 自定义渠道账号（虚拟账号）也要能冻结/删除：它不是 auths 文件里的凭据，
     // 而是 config.custom_channels 的一项，所以操作走配置接口并提示重启生效。
     const isCustom = !!a.custom_tag;
+    const isWebAPI = isCustom && String(((state.custom_channels || []).find((c) => c.name === a.uid) || {}).tag || "") === "webapi";
     const ops = isCustom
-      ? `<span class="icon-op warn" title="冻结：保留配置但不参与选号（重启生效）" onclick="toggleCustomFrozen('${a.uid}')">${a.disabled ? "▶" : "⏸"}</span>
+      ? `${isWebAPI ? `<span class="icon-op" title="补齐登录态：渠道只是网关路由，登录态在上游反代服务里" onclick="openWebAPIFor('${a.uid}')">🔑</span>` : ""}
+         <span class="icon-op warn" title="冻结：保留配置但不参与选号（即时生效）" onclick="toggleCustomFrozen('${a.uid}')">${a.disabled ? "▶" : "⏸"}</span>
          <span class="icon-op danger" title="删除该自定义渠道（重启生效）" onclick="removeCustomChannel('${a.uid}')">✕</span>`
       : noCredits
       ? `<span class="icon-op off" title="固定账号，不可停用/删除" onclick="return false">🔒</span>`
@@ -2701,6 +2703,23 @@ async function renameCustomChannel(oldName) {
   if (cur.some((x) => x.name === nn)) { toast(`「${nn}」已存在`, 6000); return; }
   c.name = nn;
   await postChannels(cur, `已改名为「${nn}」，已即时生效`);
+}
+
+// openWebAPIFor 从渠道卡片跳到 WebAPI 源卡片，补「上游服务的登录态」。
+// 为什么需要：渠道（config.custom_channels）只是网关的一条路由；
+// 它背后那个反代服务里有没有登录账号是另一回事。账号为 0 时调用会报
+// 「没有可用的账号」，而渠道卡片上原来没有任何入口去补，用户只能删了重建。
+function openWebAPIFor(channelName) {
+  openWebAPI();
+  const card = document.querySelector(`.wa-card[data-src="${channelName}"]`)
+    || document.querySelector(".wa-card");
+  if (!card) { toast("没找到对应的源卡片，请在上面手动选一个源", 6000); return; }
+  const form = card.querySelector(".wa-form");
+  if (form) form.classList.remove("hidden");
+  const adv = card.querySelector(".wa-adv");
+  if (adv) adv.setAttribute("open", "");
+  card.scrollIntoView({ block: "center", behavior: "smooth" });
+  toast("只补登录态：点「① 导入平台账号（写入该服务）」，成功后点「取消」——不用再点 ②，渠道已存在", 12000);
 }
 
 async function toggleCustomFrozen(name) {
