@@ -2415,7 +2415,7 @@ function renderWebAPICards() {
             <span class="hint" style="margin-left:8px">目标服务的默认密码是 admin，改过就填新的</span>
           </div>
           <div class="row" style="margin-top:8px">
-            <button type="button" class="btn small wa-import">导入到 webAPI 服务</button>
+            <button type="button" class="btn small wa-import">① 导入平台账号（写入该服务）</button>
             <span class="hint wa-import-msg" style="margin-left:8px"></span>
             <div class="hint" style="margin-top:4px;flex-basis:100%">
               点它 = 让网关替你去那个服务里建账号（等价于它面板里的「手动填写凭证」）。
@@ -2437,7 +2437,7 @@ function renderWebAPICards() {
         <details class="wa-adv" style="margin-top:6px">
           <summary class="hint">高级设置（名称 / 平台 / 模型 / 并发）—— 不改也能用</summary>
           ${s.platforms ? `<div class="row" style="margin-top:6px">
-            <label class="lbl wide">平台</label>
+            <label class="lbl wide">模型平台</label>
             <select class="input grow wa-plat">
               ${s.platforms.map((pf, i) => `<option value="${i}"${i === 0 ? " selected" : ""}>${esc(pf.label)}</option>`).join("")}
             </select>
@@ -2459,8 +2459,13 @@ function renderWebAPICards() {
           </div>
         </details>
         <div class="wa-err hint" style="color:var(--danger,#dc2626);margin-top:6px"></div>
+        <div class="hint" style="margin-top:10px;padding:8px 10px;border-left:3px solid var(--border,#e5e7eb)">
+          <b>两个按钮做什么（容易混）：</b><br>
+          <b>① 导入平台账号</b> = 只把「登录态」写进那个反代服务（8800）。<b>只有该平台还没登录过才需要</b>。<br>
+          <b>② 添加到网关</b> = 在网关里建一条渠道，让 <code>customopenai/&lt;模型&gt;</code> 能路由到它。<b>这一步必须做</b>。
+        </div>
         <div class="row" style="margin-top:8px">
-          <button type="button" class="btn small primary wa-submit">添加为 webAPI 账号</button>
+          <button type="button" class="btn small primary wa-submit">② 添加到网关</button>
           <button type="button" class="btn small wa-cancel" style="margin-left:6px">取消</button>
         </div>
       </div>
@@ -2629,6 +2634,7 @@ function bindWebAPIEvents() {
     const conc = Number.isFinite(concRaw) && concRaw > 0 ? Math.min(concRaw, 32) : 2;
 
     if (!models.length) { err.textContent = "模型列表不能为空（可留默认，或用逗号分隔多个）"; return; }
+    if (!key) { err.textContent = "api_key 不能为空：它填的是那个反代服务自己的秘钥（可点「自动获取」）"; return; }
     const list = await fetchChannels();
     if (list.some((c) => c.name === name)) { err.textContent = `渠道名「${name}」已存在，请改名`; return; }
 
@@ -2637,7 +2643,15 @@ function bindWebAPIEvents() {
       name, base_url: src.base.replace(/\/+$/, ""), api_key: key,
       models, rate: 0, max_concurrency: conc, tag: "webapi",
     });
-    await postChannels(list, `已添加 webAPI 账号「${name}」，已即时生效`);
+    const okSaved = await postChannels(list, `已添加 webAPI 账号「${name}」，已即时生效`);
+    if (!okSaved) return; // postChannels 内部已 toast 失败原因
+    // 回读确认：曾经出现过"点了添加但渠道没留下"的情况，这里直接核实而不是假设成功
+    const after = await fetchChannels();
+    if (!after.some((c) => c.name === name)) {
+      err.textContent = `保存后回读不到「${name}」——请刷新页面重试；若反复出现请把这条提示发我`;
+      toast(`渠道「${name}」未保存成功`, 7000);
+      return;
+    }
     closeWebAPI();
   };
 }
