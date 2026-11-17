@@ -3117,11 +3117,15 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 			apiError(w, http.StatusBadRequest, "请求体解析失败: "+err.Error())
 			return
 		}
+		// 记一行日志：面板"导入"没有访问日志可查，失败时只能靠这里还原现场
+		log.Printf("webapi 导入尝试：base=%s provider=%s name=%s", req.BaseURL, req.Provider, req.Name)
 		out, ierr := importWebAPAccount(r.Context(), req)
 		if ierr != nil {
+			log.Printf("webapi 导入失败：%v", ierr)
 			apiError(w, http.StatusBadGateway, ierr.Error())
 			return
 		}
+		log.Printf("webapi 导入成功：name=%s", req.Name)
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "account": out["account"]})
 	})
 
