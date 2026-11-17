@@ -81,8 +81,10 @@ check("gemini 输出为 cookie 行", gm.text.split(";").length >= 3);
 const gm2 = byId("gemini").build({
   ls: {}, cookies: [{ name: "__Secure-1PSID", value: "P1" }], rawDump: () => "{}",
 });
-check("gemini 缺 SAPISID -> warn 且提示缺哪条",
-  gm2.level === "warn" && gm2.usage.includes("SAPISID"));
+// 缺 SAPISID 必须"拒绝输出"：用户实测把只有 COMPASS 的半截 cookie 粘进去，
+// 面板显示「无 SAPISID」白折腾一轮 —— 宁可不给结果也不能给错的。
+check("gemini 缺 SAPISID -> err 且无 text",
+  gm2.level === "err" && gm2.text === "" && gm2.usage.includes("SAPISID"));
 
 // 5) Loomy：JWT 藏在 Cookie 里也应能扫到
 const JWT = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.sig";

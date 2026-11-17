@@ -56,11 +56,21 @@ const SITES = [
         （飞牛 → 文件管理，或用 SSH 写入），然后重启 gemini-web2api 应用。
         <br>带上登录 Cookie 后请求改按你账号的配额计算，能避开匿名访问的 429 限流。`;
       if (missing.length) {
-        return { level: "warn", text: cookie, raw: ctx.rawDump(),
-          usage: `缺少关键 Cookie：<b>${missing.join("、")}</b> —— 说明这个标签页可能没登录成功。
-            ${usage}` };
+        return {
+          level: "err", text: "", raw: ctx.rawDump(),
+          usage: `共读到 <b>${ctx.cookies.length}</b> 条 Cookie，但缺少关键项：
+            <b>${missing.join("、")}</b>。
+            <br>这说明<b>当前标签页没有登录态</b>（未登录时只剩 COMPASS 这类偏好 Cookie）。
+            <br>请确认：① 地址是 <code>gemini.google.com/app</code>；
+            ② 右上角能看到你的头像；③ 能正常发消息。满足后再点「提取」。
+            <br>下面就是这次**实际读到的 Cookie 名**（不带值，可以放心截图）：
+            <pre>${escNames(ctx.cookies)}</pre>
+            <br>若有 SID/HSID 但没有 SAPISID —— 多半是登录方式特殊（企业 SSO）；
+            若一个登录态 Cookie 都没有，就是没登录。`,
+        };
       }
-      return { level: "ok", text: cookie, raw: ctx.rawDump(), usage };
+      return { level: "ok", text: cookie, raw: ctx.rawDump(),
+        usage: `已读到 <b>${ctx.cookies.length}</b> 条 Cookie，关键项齐全（含 SAPISID）。${usage}` };
     },
   },
   {
@@ -174,6 +184,12 @@ const parseJSON = (s) => { try { return JSON.parse(s); } catch { return null; } 
 const isJWT = (v) => typeof v === "string" && v.startsWith("eyJ") && (v.match(/\./g) || []).length >= 2;
 const isLongToken = (v) => typeof v === "string" && v.length >= 20;
 
+// escNames 只输出 Cookie 名（不输出值）：排障时看名单就够，避免把凭证暴露在截图里。
+function escNames(cookies) {
+  if (!cookies || !cookies.length) return "（一条都没读到）";
+  return cookies.map((c) => c.name).slice(0, 40).join("\n");
+}
+
 function cookieString(cookies) {
   return cookies.map((c) => `${c.name}=${c.value}`).join("; ");
 }
@@ -208,7 +224,32 @@ function matchSite(urlStr) {
 
 async function collectContext(tab) {
   const url = tab.url;
-  const cookies = await chrome.cookies.getAll({ url });
+  // 先按 URL 取（path 匹配），再按**注册域**取一次并合并：
+  // Google 的关键登录 Cookie（SID/HSID/SSID/SAPISID/__Secure-1PSID）挂在 .google.com 上，
+  // 实测只按 url 取某些情况下只回一条 COMPASS —— 用户就踩了这个坑（244B、只有 COMPASS）。
+  const byURL = await chrome.cookies.getAll({ url });
+  let byDomain = [];
+  try {
+    let host = new URL(url).hostname.split(".");
+    const reg = host.slice(-2).join("."); // gemini.google.com -> google.com
+    byDomain = await chrome.cookies.getAll({ domain: reg });
+  } catch (e) { /* 忽略 */ }
+  // 第三路：把有权限域下的**全部** Cookie 再筛一遍（兜住分区 Cookie / 非标准 domain 形态）
+  let byAll = [];
+  try {
+    let reg = "";
+    try { reg = new URL(url).hostname.split(".").slice(-2).join("."); } catch (e) {}
+    const all = await chrome.cookies.getAll({});
+    byAll = reg ? all.filter((c) => (c.domain || "").replace(/^\./, "").endsWith(reg)) : [];
+  } catch (e) { /* 忽略 */ }
+  const seen = new Set();
+  const cookies = [];
+  for (const c of [...byURL, ...byDomain, ...byAll]) {
+    const k = c.name + "|" + c.domain + "|" + c.path;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    cookies.push(c);
+  }
   let ls = {};
   try {
     const [res] = await chrome.scripting.executeScript({
