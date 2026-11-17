@@ -2247,11 +2247,10 @@ const WEBAPI_SOURCES = [
     alt: "跑在电脑上时把 127.0.0.1 换成电脑局域网 IP（如 192.168.1.50:8800）",
     repo: "https://github.com/duruoxian/webai2api",
     steps: [
-      "确认飞牛上的 web2api 应用在跑（应用中心 → webai2api → 启动）",
-      "在电脑浏览器登录 deepseek 网页版 → F12 → Console 粘贴仓库 README 里那段 copy(...) 脚本，一次性拿到 4 个字段",
-      "打开 web2api 管理面板（面板只允许本机访问，需要先开 SSH 隧道：ssh -L 18800:127.0.0.1:8800 admin@飞牛IP，再开 http://127.0.0.1:18800/admin，密码 admin）",
-      "面板 →「账号管理」→ 添加账号（只填名称）→ 用「手动粘贴凭证」填入 4 个字段",
-      "面板 →「API Key」→ 生成 sk-...，把 key 填到下面",
+      "确认飞牛上的 web2api 应用在跑（应用中心 → webai2api → 启动），一般装完就在跑",
+      "登录平台账号：展开下面的「① 还没登录平台账号」→ 用上面的书签在 deepseek 页面点一下复制凭证 → 粘进来点「拆开填入」→「导入到 webAPI 服务」（网关直接帮你建账号，不用进它自己的面板）",
+      "拿 key：点 api_key 后面的「自动获取」，网关会去该服务里取现成 Key，没有就新建一个",
+      "最后点「添加为 webAPI 账号」，重启网关生效",
     ],
   },
   {
@@ -2393,7 +2392,13 @@ function renderWebAPICards() {
         </details>` : ""}
         <div class="row" style="margin-top:10px">
           <label class="lbl wide">api_key</label>
-          <input class="input grow" data-f="key" placeholder="${esc(s.keyHint)}" spellcheck="false">
+          <div class="grow">
+            <div class="row">
+              <input class="input grow" data-f="key" placeholder="${esc(s.keyHint)}" spellcheck="false">
+              <button type="button" class="btn tiny wa-getkey" style="margin-left:6px">自动获取</button>
+            </div>
+            <div class="hint wa-getkey-msg" style="margin-top:4px">不知道填什么就点「自动获取」：网关会去该服务里取现成的 Key，没有就新建一个</div>
+          </div>
         </div>
         <details class="wa-adv" style="margin-top:6px">
           <summary class="hint">高级设置（名称 / 平台 / 模型 / 并发）—— 不改也能用</summary>
@@ -2472,6 +2477,27 @@ function bindWebAPIEvents() {
       const code = decodeURIComponent(buildCredBookmarklet().replace(/^javascript:/, ""));
       try { await navigator.clipboard.writeText(code); alert("已复制脚本。\n\n到 chat.deepseek.com 按 F12 → Console 粘贴回车即可。"); }
       catch (_) { prompt("复制失败，请手动复制：", code); }
+      return;
+    }
+    // 自动获取目标服务的 API Key（用户不知道这个空填什么）
+    if (e.target.closest(".wa-getkey")) {
+      const srcK = WEBAPI_SOURCES.find((x) => x.id === card.dataset.src);
+      const msg = card.querySelector(".wa-getkey-msg");
+      const btn = e.target.closest(".wa-getkey");
+      const pwdEl = card.querySelector('[data-f="apwd"]');
+      btn.disabled = true;
+      msg.textContent = "正在获取…";
+      try {
+        const r = await api("/api/webapi/ensure_key", {
+          base_url: srcK.base.replace(/\/v1$/, ""),
+          admin_password: pwdEl ? pwdEl.value : "admin",
+        });
+        card.querySelector('[data-f="key"]').value = r.api_key || "";
+        msg.textContent = r.created ? "✅ 已在目标服务里新建了一个 Key 并填入" : "✅ 已取到现成的 Key";
+      } catch (err) {
+        msg.textContent = "❌ " + (err.message || err);
+      }
+      btn.disabled = false;
       return;
     }
     // 把书签复制出来的整段 JSON 拆成四个输入框（用户不必自己找哪个值放哪）

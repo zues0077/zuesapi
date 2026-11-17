@@ -111,24 +111,9 @@ func importWebAPAccount(ctx context.Context, in webapiImportReq) (map[string]any
 
 	client := &http.Client{Timeout: 20 * time.Second}
 
-	code, body, err := webapiPostJSON(ctx, client, base+"/admin/api/login", "", map[string]string{"password": pwd})
-	if err != nil {
-		return nil, fmt.Errorf("连不上 %s：%w（确认该服务已启动）", base, err)
-	}
-	if code != http.StatusOK {
-		return nil, fmt.Errorf("登录目标服务失败（HTTP %d）：%s", code, snippet(body))
-	}
-	var lg struct {
-		OK    bool   `json:"ok"`
-		Token string `json:"token"`
-		Error string `json:"error"`
-	}
-	if err := json.Unmarshal(body, &lg); err != nil || !lg.OK || lg.Token == "" {
-		msg := lg.Error
-		if msg == "" {
-			msg = snippet(body)
-		}
-		return nil, fmt.Errorf("目标服务管理密码不对：%s", msg)
+	token, lerr := webapiLogin(ctx, client, base, pwd)
+	if lerr != nil {
+		return nil, lerr
 	}
 
 	name := strings.TrimSpace(in.Name)
@@ -143,7 +128,7 @@ func importWebAPAccount(ctx context.Context, in webapiImportReq) (map[string]any
 		"settings_token": strings.TrimSpace(in.SettingsToken),
 		"cookie":         strings.TrimSpace(in.Cookie),
 	}
-	code, body, err = webapiPostJSON(ctx, client, base+"/admin/api/accounts", lg.Token, payload)
+	code, body, err := webapiPostJSON(ctx, client, base+"/admin/api/accounts", token, payload)
 	if err != nil {
 		return nil, fmt.Errorf("提交账号失败：%w", err)
 	}
@@ -169,4 +154,116 @@ func snippet(b []byte) string {
 		s = s[:200] + "…"
 	}
 	return s
+}
+
+// webapiGetJSON 带 admin token 的 GET，返回解析后的 JSON。
+func webapiGetJSON(ctx context.Context, client *http.Client, fullURL, token string, out any) (int, []byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fullURL, nil)
+	if err != nil {
+		return 0, nil, err
+	}
+	if token != "" {
+		req.Header.Set("X-Admin-Token", token)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if resp.StatusCode == http.StatusOK && out != nil {
+		_ = json.Unmarshal(body, out)
+	}
+	return resp.StatusCode, body, nil
+}
+
+// webapiLogin 登录目标服务拿 admin token（密码默认 admin）。
+func webapiLogin(ctx context.Context, client *http.Client, base, pwd string) (string, error) {
+	code, body, err := webapiPostJSON(ctx, client, base+"/admin/api/login", "", map[string]string{"password": pwd})
+	if err != nil {
+		return "", fmt.Errorf("连不上 %s：%w（确认该服务已启动）", base, err)
+	}
+	if code != http.StatusOK {
+		return "", fmt.Errorf("登录目标服务失败（HTTP %d）：%s", code, snippet(body))
+	}
+	var lg struct {
+		OK    bool   `json:"ok"`
+		Token string `json:"token"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(body, &lg); err != nil || !lg.OK || lg.Token == "" {
+		msg := lg.Error
+		if msg == "" {
+			msg = snippet(body)
+		}
+		return "", fmt.Errorf("目标服务管理密码不对：%s", msg)
+	}
+	return lg.Token, nil
+}
+
+// ensureWebAPIKey 取一个可用的 API Key：已有就复用（优先 enabled），没有就新建一个。
+//
+// 为什么要有这一步：面板上的「api_key」对用户是个空——那是**目标服务自己的秘钥**，
+// 得先进它的面板生成。既然网关能直接读它的 state（里面就带 keys），就没必要让人手填。
+func ensureWebAPIKey(ctx context.Context, baseURL, adminPassword string) (string, bool, error) {
+	base, err := isPrivateBaseURL(baseURL)
+	if err != nil {
+		return "", false, err
+	}
+	pwd := strings.TrimSpace(adminPassword)
+	if pwd == "" {
+		pwd = "admin"
+	}
+	client := &http.Client{Timeout: 20 * time.Second}
+	token, err := webapiLogin(ctx, client, base, pwd)
+	if err != nil {
+		return "", false, err
+	}
+
+	var st struct {
+		Keys []struct {
+			Key     string `json:"key"`
+			Enabled int    `json:"enabled"`
+			Name    string `json:"name"`
+		} `json:"keys"`
+	}
+	if code, body, gerr := webapiGetJSON(ctx, client, base+"/admin/api/state", token, &st); gerr != nil || code != http.StatusOK {
+		if gerr != nil {
+			return "", false, fmt.Errorf("读取目标服务状态失败：%w", gerr)
+		}
+		return "", false, fmt.Errorf("读取目标服务状态失败（HTTP %d）：%s", code, snippet(body))
+	}
+	for _, k := range st.Keys {
+		if k.Enabled == 1 && strings.TrimSpace(k.Key) != "" {
+			return k.Key, false, nil
+		}
+	}
+	for _, k := range st.Keys {
+		if strings.TrimSpace(k.Key) != "" {
+			return k.Key, false, nil
+		}
+	}
+
+	code, body, err := webapiPostJSON(ctx, client, base+"/admin/api/keys", token, map[string]any{
+		"name": "网关自动生成",
+	})
+	if err != nil {
+		return "", false, fmt.Errorf("创建 API Key 失败：%w", err)
+	}
+	var out struct {
+		OK  bool `json:"ok"`
+		Key struct {
+			Key string `json:"key"`
+		} `json:"key"`
+		Error string `json:"error"`
+	}
+	_ = json.Unmarshal(body, &out)
+	if code != http.StatusOK || !out.OK || strings.TrimSpace(out.Key.Key) == "" {
+		msg := out.Error
+		if msg == "" {
+			msg = snippet(body)
+		}
+		return "", false, fmt.Errorf("创建 API Key 失败：%s", msg)
+	}
+	return out.Key.Key, true, nil
 }
