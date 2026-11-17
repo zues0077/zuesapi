@@ -1,0 +1,104 @@
+#!/bin/bash
+
+### webai2api（网页版 AI 反代）在飞牛 fnOS 上的启动/停止控制。
+###
+### 与网关（wb2apifusion）的关系：网关通过「自定义渠道」填 http://127.0.0.1:8800/v1
+### 调用本服务，所以两者必须装在同一台飞牛上，且本服务只监听环回地址。
+###
+### 约定（与 fnOS FPK 一致）：$1 = start|stop|status；数据目录用 TRIM_PKGVAR，
+### 安装目录用 TRIM_APPDEST；向导变量 port/host 从环境注入。
+
+PORT="${port:-8800}"
+HOST="${host:-127.0.0.1}"
+DATA="${TRIM_PKGVAR}"
+BIN="${TRIM_APPDEST}/bin/webai2api"
+LOG="${DATA}/info.log"
+PIDF="${DATA}/app.pid"
+
+log_msg() { echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "${LOG}"; }
+
+check_process() { kill -0 "$1" 2>/dev/null; }
+
+wait_port() {
+    i=0
+    while [ $i -lt 25 ]; do
+        if (echo >/dev/tcp/127.0.0.1/"${PORT}") >/dev/null 2>&1; then
+            return 0
+        fi
+        i=$((i+1))
+        sleep 1
+    done
+    return 1
+}
+
+start_process() {
+    mkdir -p "${DATA}"
+    # 单实例：先把上一次的进程收掉，避免端口占用。
+    if [ -r "${PIDF}" ]; then
+        old=$(head -n 1 "${PIDF}" | tr -d '[:space:]')
+        if [ -n "${old}" ] && check_process "${old}"; then
+            log_msg "发现旧进程 pid=${old}，先停止"
+            kill -TERM "${old}" 2>/dev/null
+            sleep 2
+            check_process "${old}" && kill -KILL "${old}" 2>/dev/null
+        fi
+        rm -f "${PIDF}"
+    fi
+
+    log_msg "启动：${BIN} --host ${HOST} --port ${PORT}（工作目录 ${DATA}）"
+    # cd 到数据目录：程序把 SQLite 与浏览器档案写成 ./data/，换目录等于换账号池。
+    cd "${DATA}" || { log_msg "进入 ${DATA} 失败"; return 1; }
+    nohup "${BIN}" --host "${HOST}" --port "${PORT}" >> "${LOG}" 2>&1 &
+    pid=$!
+    echo "${pid}" > "${PIDF}"
+
+    # onefile 首次启动要解包（约 2~6 秒），必须等端口真的起来才算成功，
+    # 否则应用中心会显示"运行中"但实际秒退。
+    if wait_port; then
+        log_msg "启动成功 pid=${pid} http://${HOST}:${PORT}"
+        return 0
+    fi
+    log_msg "启动失败：${PORT} 未监听，请看 ${LOG} 末尾"
+    return 1
+}
+
+stop_process() {
+    log_msg "停止进程 ..."
+    if [ -r "${PIDF}" ]; then
+        pid=$(head -n 1 "${PIDF}" | tr -d '[:space:]')
+        if [ -n "${pid}" ] && check_process "${pid}"; then
+            kill -TERM "${pid}" 2>/dev/null
+            count=0
+            while check_process "${pid}" && [ $count -lt 10 ]; do
+                sleep 1
+                count=$((count+1))
+            done
+            check_process "${pid}" && kill -KILL "${pid}" 2>/dev/null
+        fi
+        rm -f "${PIDF}"
+    fi
+    # 兜底：pid 文件丢失时按端口找残留
+    left=$(ss -ltnp 2>/dev/null | grep ":${PORT} " | grep -o 'pid=[0-9]*' | head -1 | cut -d= -f2)
+    if [ -n "${left}" ]; then
+        log_msg "按端口清理残留 pid=${left}"
+        kill -TERM "${left}" 2>/dev/null
+        sleep 1
+    fi
+    return 0
+}
+
+status() {
+    if [ -r "${PIDF}" ]; then
+        pid=$(head -n 1 "${PIDF}" | tr -d '[:space:]')
+        check_process "${pid}" && return 0
+        rm -f "${PIDF}"
+    fi
+    return 1
+}
+
+case $1 in
+start)  start_process ;;
+stop)   stop_process ;;
+status) status && exit 0 || exit 3 ;;
+*)      exit 1 ;;
+esac

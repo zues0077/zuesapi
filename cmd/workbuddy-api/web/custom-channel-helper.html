@@ -111,8 +111,11 @@
         <input id="rate" type="number" step="0.01" value="0">
       </div>
       <div>
-        <label class="f">模型前缀（自动）</label>
-        <input id="prefix" readonly value="customopenai">
+        <label class="f">类型（账号卡片上的标注）</label>
+        <select id="tag">
+          <option value="custom">自定义</option>
+          <option value="reverse">逆向源</option>
+        </select>
       </div>
     </div>
     <p class="hint">rate：<b>0</b> = 免费/最便宜，自动选渠时优先；<b>正数</b> = 按倍率从低到高；<b>负数</b> = 未知，排最后。你自己买的付费 key 建议填实际倍率（比如官方 1.0），这样自动选渠会优先用免费渠道。</p>
@@ -209,7 +212,7 @@ const P = [
     models:["gpt-4o-mini"], tip:"令牌在站点「令牌」页生成；模型名按站点「渠道」页支持的写。" },
   { id:"webai2api", label:"webai2api 逆向源（duruoxian / foxhui）", base:"http://电脑IP:8800/v1",
     site:"https://github.com/duruoxian/webai2api", keyUrl:"https://github.com/duruoxian/webai2api/releases",
-    models:["deepseek-chat","GLM-5.3","kimi-k3","qwen3.7-plus"],
+    models:["deepseek-chat","GLM-5.3","kimi-k3","qwen3.7-plus"], tag:"reverse",
     tip:"把网页版 AI 反代成 OpenAI 兼容 API 的项目。关键：它跑在你的电脑上，网关在飞牛上，所以 base_url 必须填电脑的局域网 IP（如 192.168.1.50:8800），不能填 127.0.0.1；并在电脑防火墙放行该端口。key 用它面板生成的 sk-..." },
   { id:"custom", label:"其他 / 自建（自己填 base_url）", base:"", site:"", keyUrl:"",
     models:[], tip:"只要它提供 POST {base_url}/chat/completions 且回 OpenAI 格式就能接。" },
@@ -231,6 +234,7 @@ function init(){
   apply(0);
   $("toggleKey").onclick = ()=>{ const k=$("key"); const t=k.type==="password"; k.type=t?"text":"password"; $("toggleKey").textContent=t?"隐藏":"显示"; };
   ["key","manual","name","rate"].forEach(id=>$(id).addEventListener("input",render));
+  if ($("tag")) $("tag").addEventListener("change", render);
   $("copy").onclick = copy;
   $("download").onclick = download;
   render();
@@ -242,6 +246,7 @@ function apply(i){
   $("name").value = p.id === "custom" ? "" : p.id;
   if (p.base) { /* base 直接体现在输出里 */ }
   $("manual").value = "";
+  if ($("tag")) $("tag").value = p.tag || "custom";
   $("pinfo").innerHTML = `<dl>
       <dt>base_url</dt><dd><code>${esc(p.base||"（在下面自己填）")}</code>
         ${p.base?'<button class="btn mini" id="fillBase" style="margin-left:8px">复制</button>':""}</dd>
@@ -278,6 +283,7 @@ function render(){
     api_key: $("key").value.trim(),
     models: currentModels(),
     rate: Number.isFinite(parseFloat($("rate").value)) ? parseFloat($("rate").value) : 0,
+    tag: ($("tag") && $("tag").value) || "custom",
   };
   $("out").textContent = JSON.stringify({ channels:[ch] }, null, 2);
 }

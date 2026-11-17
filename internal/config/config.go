@@ -115,6 +115,10 @@ type CustomChannel struct {
 	APIKey  string   `json:"api_key"`  // Bearer key；空表示上游无鉴权
 	Models  []string `json:"models"`   // 该实例提供的模型 id（用于 /v1/models 与路由命中）
 	Rate    float64  `json:"rate"`     // 费率倍率：0=免费优先；<0=未知（排最后）；>0=按值排序
+	// Tag 账号列表里的展示标签：""/"custom" = 自定义；"reverse" = 逆向源。
+	// 不参与任何逻辑，纯展示（用户要求：自定义账号在账号卡片上标出来，
+	// duruoxian 这类网页反代源要换个标注）。
+	Tag string `json:"tag,omitempty"`
 	// MaxConcurrency 该实例的并发上限（0 = 不限制）。
 	// 免费逆向源（网页版 DeepSeek/Kimi 等）并发一高极易触发风控，建议设 1~2。
 	MaxConcurrency int `json:"max_concurrency,omitempty"`
@@ -665,6 +669,11 @@ func (c *Config) normalize() error {
 				}
 			}
 			cc.Models = models
+			switch cc.Tag {
+			case "", "custom", "reverse":
+			default:
+				cc.Tag = "" // 未知标签一律按「自定义」处理，不报错（纯展示字段）
+			}
 			// 并发上限：0=不限制；负数按 0 处理；上限 32（再多只会把免费源打爆）。
 			if cc.MaxConcurrency < 0 || cc.MaxConcurrency > 32 {
 				if cc.MaxConcurrency > 32 {

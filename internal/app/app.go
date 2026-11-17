@@ -2252,6 +2252,9 @@ type AccountView struct {
 	UID      string `json:"uid"`
 	Group    string `json:"group"` // workbuddy | workbuddyai | traework | qoder
 	Nickname string `json:"nickname"`
+	// CustomTag 自定义渠道账号的展示标签（"custom"=自定义 / "reverse"=逆向源）。
+	// 空表示不是自定义渠道账号。纯展示，不参与路由。
+	CustomTag string `json:"custom_tag,omitempty"`
 	// Credits 本工具可消耗的积分余额（pool 路由依据）。
 	Credits int64 `json:"credits"`
 	// ExpiringCredits 可消耗余额中 24h 内（到期日≤明天）到期的部分，仅面板展示。
@@ -2445,10 +2448,22 @@ func (a *App) GetState() State {
 func (a *App) accountViews() []AccountView {
 	statuses := a.allStatuses()
 	out := make([]AccountView, 0, len(statuses))
+	// 自定义渠道账号的标签表（uid = config 里的实例名），纯展示用。
+	customTags := map[string]string{}
+	a.mu.Lock()
+	for _, cc := range a.cfg.CustomChannels {
+		tag := cc.Tag
+		if tag == "" {
+			tag = "custom"
+		}
+		customTags[cc.Name] = tag
+	}
+	a.mu.Unlock()
 	for _, s := range statuses {
 		group := a.accountGroup(s.UID)
 		out = append(out, AccountView{
 			UID:             s.UID,
+			CustomTag:       customTags[s.UID],
 			Group:           group,
 			Nickname:        s.Nickname,
 			Credits:         s.Credits,

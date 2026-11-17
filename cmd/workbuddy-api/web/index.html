@@ -71,14 +71,17 @@
           <button class="btn primary alt qwenwork" id="btnAddQwen" style="grid-column:3;grid-row:2">＋ 千问办公</button>
           <button class="btn primary alt raccoon" id="btnAddRaccoon" style="grid-column:4;grid-row:2">＋ 小浣熊</button>
           <button class="btn primary alt glm" id="btnAddGLM" style="grid-column:5;grid-row:2" title="体验渠道：仅文本对话，不支持工具调用/多模态">＋ 智谱清言</button>
-          <button class="btn primary alt" id="btnAddJSON" style="grid-column:1;grid-row:3"
+          <!-- 第 3 行：用户自定义（不依赖官方登录，自己填 base_url + key） -->
+          <button class="btn primary alt custom" id="btnAddCustomChannelEntry" style="grid-column:1;grid-row:3"
+            title="添加一个自定义 OpenAI 兼容上游（填 base_url + api_key，可拉取模型列表）">＋ 增加自定义账号</button>
+          <button class="btn primary alt custom" id="btnOpenGenerator" style="grid-column:2;grid-row:3"
+            title="打开配置生成器：选平台自动填 base_url、给出去哪拿 key 的链接，生成后可直接粘回来导入">🧩 配置生成器</button>
+          <button class="btn primary alt" id="btnAddJSON" style="grid-column:1;grid-row:4"
             title="粘贴凭据 JSON 直接添加账号（全渠道兜底，支持嵌套 auths 格式与扁平格式）">⌨ JSON 登录</button>
-          <button class="btn primary alt" id="btnAddBatchJSON" style="grid-column:2;grid-row:3"
+          <button class="btn primary alt" id="btnAddBatchJSON" style="grid-column:2;grid-row:4"
             title="一次粘贴多条凭据（可直接粘「导出全部账号」的文件），逐条回执、只重载一次">⇪ 批量 JSON 导入</button>
-          <button class="btn small" id="btnExportAll" style="grid-column:3;grid-row:3"
+          <button class="btn small" id="btnExportAll" style="grid-column:3;grid-row:4"
             title="把全部账号导出成一个 JSON 文件，可整份粘回批量导入">⇩ 导出全部账号</button>
-          <button class="btn primary alt custom" id="btnAddCustomChannelEntry" style="grid-column:4;grid-row:3;grid-column:span 1"
-            title="接入任意 OpenAI 兼容上游（填 base_url + api_key，可拉取模型列表自动填写）">＋ 自定义渠道</button>
         </div>
       </div>
     </div>
@@ -645,6 +648,15 @@
         <label class="lbl wide">倍率</label>
         <input class="input" id="ccRate" type="number" step="0.01" value="0" style="width:110px">
         <span class="hint" style="margin-left:8px">0 = 免费/最便宜，自动选渠时优先；正数按倍率排序；负数=未知排最后</span>
+      </div>
+      <div class="row" style="margin-top:6px">
+      <div class="row" style="margin-top:6px">
+        <label class="lbl wide">类型</label>
+        <select class="input" id="ccTag" style="width:150px">
+          <option value="custom">自定义</option>
+          <option value="reverse">逆向源</option>
+        </select>
+        <span class="hint" style="margin-left:8px">仅影响账号卡片上的标签；duruoxian 这类网页反代选「逆向源」</span>
       </div>
       <div class="row" style="margin-top:6px">
         <label class="lbl wide">并发上限</label>

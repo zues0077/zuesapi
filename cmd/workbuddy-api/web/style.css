@@ -586,6 +586,7 @@ code.about-repo:active { transform: translateY(1px); }
 
 /* customopenai 自定义 OpenAI 兼容上游（用户自填 base_url，用中性灰蓝与官方渠道区分） */
 .badge.custom { background: #475569; }
+.badge.reverse { background: #7c3aed; }
 .fees .ch-header.custom td { color: #475569; }
 
 /* 自定义渠道弹层的模型勾选区（列宽自适应，模型 id 可能很长） */

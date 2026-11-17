@@ -666,12 +666,18 @@ function renderAccounts() {
     // 前端不做时间推算 —— 面板可能因后台标签页节流而刷新变慢，本地算时间会与后端口径漂移。
     const liveTag = `<span class="acct-live-slot">${liveTagHtml(a)}</span>`;
 
+    // 自定义渠道账号的来源标签（用户要求：自定义账号要标出来，逆向源换个标注）。
+    // 数据由后端 /api/state 的 custom_tag 下发，前端不猜渠道。
+    const customTag = a.custom_tag
+      ? `<span class="badge ${a.custom_tag === "reverse" ? "reverse" : "custom"}" style="margin-left:6px;vertical-align:middle">${a.custom_tag === "reverse" ? "逆向源" : "自定义"}</span>`
+      : "";
+
     return `
     <div class="acct-card${disabledClass}${coolingClass}${a.pinned ? " pinned" : ""}${a.in_use ? " in-use" : ""}" data-uid="${esc(a.uid)}">
       <div class="acct-top">
         <div>
           <span class="badge ${group}">${groupName}</span>
-          ${nameHtml}
+          ${nameHtml}${customTag}
           ${liveTag}
         </div>
         <div class="acct-ops">
@@ -2028,6 +2034,7 @@ function openCustomChannelModal() {
   $("ccModelsManual").value = "";
   $("ccRate").value = "0";
   $("ccConc").value = "0";
+  if ($("ccTag")) $("ccTag").value = "custom";
   $("ccPreset").value = "";
   $("ccModelList").innerHTML = "";
   $("ccProbeMsg").textContent = "先填好 base_url / api_key 再点";
@@ -2091,6 +2098,7 @@ function collectOneCustom() {
   const base_url = $("ccBase").value.trim().replace(/\/+$/, "");
   const api_key = $("ccKey").value.trim();
   const rate = parseFloat($("ccRate").value);
+  const tag = ($("ccTag") && $("ccTag").value) || "custom";
   const concRaw = parseInt($("ccConc").value, 10);
   const max_concurrency = Number.isFinite(concRaw) && concRaw > 0 ? Math.min(concRaw, 32) : 0;
   const checked = [...document.querySelectorAll(".cc-model-cb")].filter((c) => c.checked).map((c) => c.value);
@@ -2103,7 +2111,7 @@ function collectOneCustom() {
   try { u = new URL(base_url); } catch { return [null, `base_url 无效：${base_url}`]; }
   if (!["http:", "https:"].includes(u.protocol)) return [null, "base_url 只支持 http/https"];
   if (!models.length) return [null, "一个模型都没有：点「拉取模型」勾选，或在「手动补」里填模型 id"];
-  return [{ name, base_url, api_key, models, rate: Number.isFinite(rate) ? rate : 0, max_concurrency }, ""];
+  return [{ name, base_url, api_key, models, rate: Number.isFinite(rate) ? rate : 0, max_concurrency, tag }, ""];
 }
 
 async function addCustomChannel() {
@@ -2117,6 +2125,7 @@ async function addCustomChannel() {
   $("ccModelsManual").value = "";
   $("ccRate").value = "0";
   $("ccConc").value = "0";
+  if ($("ccTag")) $("ccTag").value = "custom";
   $("ccPreset").value = "";
   $("ccModelList").innerHTML = "";
   ccProbed = [];
@@ -2145,6 +2154,7 @@ function importCustomJSON() {
   $("ccKey").value = first.api_key || "";
   $("ccRate").value = String(first.rate ?? 0);
   $("ccConc").value = String(first.max_concurrency ?? 0);
+  if ($("ccTag")) $("ccTag").value = first.tag === "reverse" ? "reverse" : "custom";
   const ms = (first.models || []).filter(Boolean);
   $("ccModelsManual").value = ms.join(", ");
   $("ccModelList").innerHTML = "";
@@ -2613,6 +2623,8 @@ function bind() {
   $("btnAddMulti").onclick = addMultiAliasFromForm;
   // 自定义渠道：入口在账号管理页（不是设置里）。添加/删除都在独立弹层里完成。
   $("btnAddCustomChannelEntry").onclick = openCustomChannelModal;
+  // 配置生成器是独立静态页（同一份 go:embed 资源），新窗口打开便于对照填写。
+  $("btnOpenGenerator").onclick = () => window.open("/custom-channel-helper.html", "_blank");
   $("btnCustomChannelClose").onclick = closeCustomChannelModal;
   $("btnAddCustomConfirm").onclick = addCustomChannel;
   $("btnProbeModels").onclick = probeCustomModels;

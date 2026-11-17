@@ -1,0 +1,10 @@
+#!/bin/bash
+
+### 安装后调用：准备数据目录。
+### 程序把 SQLite（webai2api.db）与浏览器档案放在 ./data/ 下，工作目录就是 TRIM_PKGVAR，
+### 因此这里只需要保证目录存在且属主正确。
+
+mkdir -p "${TRIM_PKGVAR}/data"
+chmod 700 "${TRIM_PKGVAR}" 2>/dev/null
+
+exit 0

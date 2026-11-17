@@ -1,0 +1,29 @@
+[
+  {
+    "stepTitle": "安装 webai2api",
+    "items": [
+      {
+        "type": "text",
+        "field": "port",
+        "label": "服务端口",
+        "rules": [
+          {
+            "required": true,
+            "message": "请输入端口"
+          }
+        ],
+        "options": [],
+        "helpText": "默认 8800。只监听 127.0.0.1，供同机网关调用；与其它应用冲突时才需修改。",
+        "initValue": "8800"
+      },
+      {
+        "type": "tips",
+        "field": "wizard_default",
+        "label": "安装后怎么用",
+        "rules": [],
+        "options": [],
+        "helpText": "<p>① 先到应用中心启动本应用；<br>② 在网关（wb2api 融合版）的「账号管理 → ＋ 自定义渠道」里填：<br>　 base_url = <code>http://127.0.0.1:8800/v1</code>，api_key 用本服务面板生成的 <code>sk-...</code>；<br>③ 登录平台账号：管理面板只允许本机访问，本机可用 <code>ssh -L 18800:127.0.0.1:8800 admin@飞牛IP</code> 后打开 <code>http://127.0.0.1:18800/admin</code>（默认密码 admin）。</p>"
+      }
+    ]
+  }
+]

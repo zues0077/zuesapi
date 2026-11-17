@@ -1,0 +1,21 @@
+[
+  {
+    "stepTitle": "webai2api 设置",
+    "items": [
+      {
+        "type": "text",
+        "field": "port",
+        "label": "服务端口",
+        "rules": [
+          {
+            "required": true,
+            "message": "请输入端口"
+          }
+        ],
+        "options": [],
+        "helpText": "改端口后需要同步修改网关里自定义渠道的 base_url，并重启两侧应用。",
+        "initValue": "8800"
+      }
+    ]
+  }
+]
