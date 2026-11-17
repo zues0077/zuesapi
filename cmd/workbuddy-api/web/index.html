@@ -71,17 +71,17 @@
           <button class="btn primary alt qwenwork" id="btnAddQwen" style="grid-column:3;grid-row:2">＋ 千问办公</button>
           <button class="btn primary alt raccoon" id="btnAddRaccoon" style="grid-column:4;grid-row:2">＋ 小浣熊</button>
           <button class="btn primary alt glm" id="btnAddGLM" style="grid-column:5;grid-row:2" title="体验渠道：仅文本对话，不支持工具调用/多模态">＋ 智谱清言</button>
-          <!-- 第 3 行：用户自定义（不依赖官方登录，自己填 base_url + key） -->
+          <!-- 第 3 行：自定义/网页反代 + JSON 工具（5 列排满，与上面两行等宽对齐） -->
           <button class="btn primary alt custom" id="btnAddCustomChannelEntry" style="grid-column:1;grid-row:3"
             title="添加一个自定义 OpenAI 兼容上游（填 base_url + api_key，可拉取模型列表）">＋ 增加自定义账号</button>
           
-          <button class="btn primary alt webapi" id="btnOpenWebAPI" style="grid-column:5;grid-row:4"
+          <button class="btn primary alt webapi" id="btnOpenWebAPI" style="grid-column:2;grid-row:3"
             title="网页版模型接入（WebAPI）：把 DeepSeek/Kimi/Gemini 等网页版变成免费 OpenAI 接口，含部署教程">🌐 WebAPI 接入</button>
-          <button class="btn primary alt" id="btnAddJSON" style="grid-column:1;grid-row:4"
+          <button class="btn primary alt" id="btnAddJSON" style="grid-column:3;grid-row:3"
             title="粘贴凭据 JSON 直接添加账号（全渠道兜底，支持嵌套 auths 格式与扁平格式）">⌨ JSON 登录</button>
-          <button class="btn primary alt" id="btnAddBatchJSON" style="grid-column:2;grid-row:4"
+          <button class="btn primary alt" id="btnAddBatchJSON" style="grid-column:4;grid-row:3"
             title="一次粘贴多条凭据（可直接粘「导出全部账号」的文件），逐条回执、只重载一次">⇪ 批量 JSON 导入</button>
-          <button class="btn small" id="btnExportAll" style="grid-column:3;grid-row:4"
+          <button class="btn primary alt" id="btnExportAll" style="grid-column:5;grid-row:3"
             title="把全部账号导出成一个 JSON 文件，可整份粘回批量导入">⇩ 导出全部账号</button>
         </div>
       </div>

@@ -1438,6 +1438,7 @@ function promptJSONLogin() {
   if (!sel.options.length) {
     for (const [k, name] of Object.entries(CH_LABEL)) {
       if (k === "traecode") continue; // 与 traework 共账号，不单列
+      if (k === "qoder") continue;    // 旧 Qoder 渠道已下线（界面无入口），下拉不能残留
       if (NO_CREDITS.has(k)) continue; // 虚拟渠道无凭证可粘贴（走"自定义渠道管理区"配置）
       const opt = document.createElement("option");
       opt.value = k; opt.textContent = name;
@@ -2221,6 +2222,7 @@ const WEBAPI_SOURCES = [
     base: "http://127.0.0.1:8800/v1",
     keyHint: "面板「API Key」页生成 sk-...",
     login: "要登录（飞牛上没有内置浏览器，改用手动粘凭证）",
+    bookmarklet: true,
     models: ["deepseek-chat", "deepseek-reasoner", "GLM-5.3", "kimi-k3", "qwen3.7-plus"],
     alt: "跑在电脑上时把 127.0.0.1 换成电脑局域网 IP（如 192.168.1.50:8800）",
     repo: "https://github.com/duruoxian/webai2api",
@@ -2253,6 +2255,28 @@ const WEBAPI_SOURCES = [
   },
 ];
 
+// buildCredBookmarklet 生成「一键取 deepseek 凭证」的书签脚本。
+// 为什么不只给 F12 片段：用户明确说"不想再单独跑脚本/敲命令"——
+// 书签栏拖一下就永久存在，在 deepseek 页面点一下即可把四个字段写进剪贴板，
+// 比 F12 → Console → 粘贴 → 回车 少三步，也不用装任何扩展。
+function buildCredBookmarklet() {
+  const NL = "String.fromCharCode(10)";
+  const code = [
+    "(function(){try{",
+    "var t=localStorage.getItem('userToken');",
+    "var d=localStorage.getItem('deepseek-device-id:chat');",
+    "var s=localStorage.getItem('settingsJwt');",
+    "var o={auth_token:t?JSON.parse(t).value:'',device_id:d||'',",
+    "settings_token:s?JSON.parse(s).value.jwt:'',cookie:document.cookie};",
+    "var j=JSON.stringify(o,null,2);",
+    "navigator.clipboard.writeText(j).then(",
+    "function(){alert('已复制 deepseek 凭证，去面板「账号管理 → 添加账号 → 手动粘贴凭证」粘贴')},",
+    "function(){prompt('自动复制失败，请手动复制：',j)});",
+    "}catch(e){alert('取凭证失败：'+e+String.fromCharCode(10)+'请确认已登录 deepseek 网页版')}})()",
+  ].join("");
+  return "javascript:" + encodeURIComponent(code);
+}
+
 function renderWebAPICards() {
   const box = $("webapiCards");
   if (!box) return;
@@ -2270,6 +2294,11 @@ function renderWebAPICards() {
       <div class="wa-kv"><span>API Key</span><div>${esc(s.keyHint)}</div></div>
       <div class="wa-kv"><span>怎么登录</span><div>${esc(s.login)}</div></div>
       <div class="wa-kv"><span>项目地址</span><div><a href="${esc(s.repo)}" target="_blank" rel="noreferrer">${esc(s.repo)}</a></div></div>
+      ${s.bookmarklet ? `<div class="wa-kv"><span>一键取凭证</span><div>
+        <a class="btn tiny" href="${buildCredBookmarklet()}" onclick="return false" draggable="true"
+           title="拖动我到浏览器书签栏；以后在 deepseek 网页点一下就自动复制四个字段">🔖 取凭证书签（拖到书签栏）</a>
+        <div class="hint" style="margin-top:4px">拖到书签栏后，在 deepseek 页面点一次即可，不必再开 F12。</div>
+      </div></div>` : ""}
       <div class="wa-kv"><span>怎么做</span><div>
         <ol class="wa-steps">${(s.steps || []).map((t) => `<li>${esc(t)}</li>`).join("")}</ol>
       </div></div>

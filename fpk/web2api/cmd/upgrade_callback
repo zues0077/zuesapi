@@ -2,4 +2,11 @@
 
 ### 升级后调用。
 
+PYBIN="$(ls /vol2/@appcenter/python312/bin/python3.12 2>/dev/null | head -1)"
+[ -z "${PYBIN}" ] && PYBIN="$(command -v python3 2>/dev/null)"
+PATCH="${TRIM_APPDEST}/patches/allow-lan-admin.py"
+if [ -n "${PYBIN}" ] && [ -f "${PATCH}" ]; then
+    "${PYBIN}" "${PATCH}" "${TRIM_APPDEST}/pysite/webai2api/app.py" >> "${TRIM_PKGVAR}/patch.log" 2>&1
+fi
+
 exit 0

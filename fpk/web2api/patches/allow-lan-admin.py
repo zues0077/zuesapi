@@ -10,7 +10,7 @@ import io
 import shutil
 import sys
 
-P = "/vol2/@appcenter/web2api/pysite/webai2api/app.py"
+P = sys.argv[1] if len(sys.argv) > 1 else "/vol2/@appcenter/web2api/pysite/webai2api/app.py"
 
 HELPER = '''    def _is_private_client(host: str) -> bool:
         """局域网客户端放行（自用补丁）：飞牛无图形界面，内置浏览器登录不可用，
