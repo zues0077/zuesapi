@@ -2215,7 +2215,7 @@ const WEBAPI_SOURCES = [
     where: "飞牛或任意装 Python 的机器（一条命令）",
     base: "http://127.0.0.1:8081/v1",
     keyHint: "看它目录里 config.json 的 api_keys（没配时随便填）",
-    login: "不用登录",
+    login: "不用登录（但要出墙代理；被 429 时可加 cookie）",
     models: ["gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash-thinking", "gemini-3.1-pro", "gemini-auto"],
     alt: "跑在别的机器上时，把 127.0.0.1 换成那台机器的局域网 IP",
     repo: "https://github.com/Sophomoresty/gemini-web2api",
@@ -2223,7 +2223,8 @@ const WEBAPI_SOURCES = [
       "在飞牛上装好 Python（应用中心）后执行：pip install httpx",
       "下载仓库里的 gemini_web2api.py（单文件），放到任意目录",
       "运行：python gemini_web2api.py（默认监听 8081）",
-      "不用登录、不用 Cookie，直接填下面的 api_key（随便填 sk-any）",
+      "填 api_key：看它 config.json 的 api_keys（没配时随便填）",
+      "⚠️ 若返回 429 Too Many Requests：说明出口 IP 被 Google 限流（机场节点被共用常见）。两个解法：① 换个干净节点；② 带登录态——浏览器登录 gemini.google.com 后导出 cookie 存成 /vol1/@appdata/gemini-web2api/cookie.txt 再重启该应用（带 SAPISID 后按账号配额算，不再吃匿名限流）",
     ],
   },
   {
