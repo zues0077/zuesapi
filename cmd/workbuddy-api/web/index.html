@@ -646,6 +646,11 @@
         <input class="input" id="ccRate" type="number" step="0.01" value="0" style="width:110px">
         <span class="hint" style="margin-left:8px">0 = 免费/最便宜，自动选渠时优先；正数按倍率排序；负数=未知排最后</span>
       </div>
+      <div class="row" style="margin-top:6px">
+        <label class="lbl wide">并发上限</label>
+        <input class="input" id="ccConc" type="number" step="1" min="0" max="32" value="0" style="width:110px">
+        <span class="hint" style="margin-left:8px">0 = 不限制；<b>免费逆向源建议设 1~2</b>（并发一高容易被平台风控）</span>
+      </div>
       <div class="hint" id="ccErr" style="color:var(--danger);margin-top:6px"></div>
       <div class="hint" style="margin-top:6px">保存后需<b>重启网关</b>生效（配置文件写入 custom_channels）。</div>
 

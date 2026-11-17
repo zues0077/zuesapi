@@ -2027,6 +2027,7 @@ function openCustomChannelModal() {
   $("ccKey").value = "";
   $("ccModelsManual").value = "";
   $("ccRate").value = "0";
+  $("ccConc").value = "0";
   $("ccPreset").value = "";
   $("ccModelList").innerHTML = "";
   $("ccProbeMsg").textContent = "先填好 base_url / api_key 再点";
@@ -2049,7 +2050,7 @@ function renderCustomExisting() {
     <div class="row proxy-row cc-exist-row" data-name="${esc(cc.name)}">
       <span class="badge custom">${esc(cc.name)}</span>
       <span class="hint grow" style="margin-left:8px;word-break:break-all">${esc(cc.base_url || "(未填 base_url)")}
-        · 模型 ${(cc.models || []).length} 个 · 倍率 ${esc(String(cc.rate ?? 0))}</span>
+        · 模型 ${(cc.models || []).length} 个 · 倍率 ${esc(String(cc.rate ?? 0))} · 并发 ${cc.max_concurrency ? esc(String(cc.max_concurrency)) : "不限"}</span>
       <button type="button" class="btn tiny cc-exist-remove" title="删除该渠道（需重启生效）">删除</button>
     </div>`).join("");
 }
@@ -2090,6 +2091,8 @@ function collectOneCustom() {
   const base_url = $("ccBase").value.trim().replace(/\/+$/, "");
   const api_key = $("ccKey").value.trim();
   const rate = parseFloat($("ccRate").value);
+  const concRaw = parseInt($("ccConc").value, 10);
+  const max_concurrency = Number.isFinite(concRaw) && concRaw > 0 ? Math.min(concRaw, 32) : 0;
   const checked = [...document.querySelectorAll(".cc-model-cb")].filter((c) => c.checked).map((c) => c.value);
   const manual = $("ccModelsManual").value.split(/[,\s]+/).map((s) => s.trim()).filter(Boolean);
   const models = [...new Set([...checked, ...manual])];
@@ -2100,7 +2103,7 @@ function collectOneCustom() {
   try { u = new URL(base_url); } catch { return [null, `base_url 无效：${base_url}`]; }
   if (!["http:", "https:"].includes(u.protocol)) return [null, "base_url 只支持 http/https"];
   if (!models.length) return [null, "一个模型都没有：点「拉取模型」勾选，或在「手动补」里填模型 id"];
-  return [{ name, base_url, api_key, models, rate: Number.isFinite(rate) ? rate : 0 }, ""];
+  return [{ name, base_url, api_key, models, rate: Number.isFinite(rate) ? rate : 0, max_concurrency }, ""];
 }
 
 async function addCustomChannel() {
@@ -2113,6 +2116,7 @@ async function addCustomChannel() {
   $("ccKey").value = "";
   $("ccModelsManual").value = "";
   $("ccRate").value = "0";
+  $("ccConc").value = "0";
   $("ccPreset").value = "";
   $("ccModelList").innerHTML = "";
   ccProbed = [];
@@ -2140,6 +2144,7 @@ function importCustomJSON() {
   $("ccBase").value = String(first.base_url).replace(/\/+$/, "");
   $("ccKey").value = first.api_key || "";
   $("ccRate").value = String(first.rate ?? 0);
+  $("ccConc").value = String(first.max_concurrency ?? 0);
   const ms = (first.models || []).filter(Boolean);
   $("ccModelsManual").value = ms.join(", ");
   $("ccModelList").innerHTML = "";

@@ -56,3 +56,27 @@ func TestDefaultHasEmptyCustomChannels(t *testing.T) {
 		t.Fatalf("默认应为空切片（非 nil），实际 %+v", c.CustomChannels)
 	}
 }
+
+// TestCustomChannelsMaxConcurrency 并发上限归一：0=不限、负数归 0、超 32 钳到 32。
+func TestCustomChannelsMaxConcurrency(t *testing.T) {
+	c := Default()
+	c.CustomChannels = []CustomChannel{
+		{Name: "a", BaseURL: "http://h:1/v1", MaxConcurrency: 0},
+		{Name: "b", BaseURL: "http://h:2/v1", MaxConcurrency: -3},
+		{Name: "c", BaseURL: "http://h:3/v1", MaxConcurrency: 2},
+		{Name: "d", BaseURL: "http://h:4/v1", MaxConcurrency: 999},
+	}
+	if err := c.normalize(); err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	got := map[string]int{}
+	for _, cc := range c.CustomChannels {
+		got[cc.Name] = cc.MaxConcurrency
+	}
+	want := map[string]int{"a": 0, "b": 0, "c": 2, "d": 32}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("%s 的 max_concurrency 期望 %d，实际 %d", k, v, got[k])
+		}
+	}
+}

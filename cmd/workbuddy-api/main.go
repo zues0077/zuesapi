@@ -328,14 +328,15 @@ func main() {
 				Models: append([]string(nil), cc.Models...),
 			}
 			customPool.Add(a)
-			customUp.RegisterInstance(cc.Name, cc.Models, cc.Rate)
+			customUp.RegisterInstance(cc.Name, cc.Models, cc.Rate, cc.MaxConcurrency)
 			for _, m := range cc.Models {
 				m = strings.TrimSpace(m)
 				if m != "" {
 					customStatic = append(customStatic, provider.ModelInfo{ID: m, Name: m, ContextFromAPI: false})
 				}
 			}
-			log.Printf("自定义渠道实例：name=%s base_url=%s models=%d rate=%.2f", cc.Name, cc.BaseURL, len(cc.Models), cc.Rate)
+			log.Printf("自定义渠道实例：name=%s base_url=%s models=%d rate=%.2f max_conc=%d",
+				cc.Name, cc.BaseURL, len(cc.Models), cc.Rate, cc.MaxConcurrency)
 		}
 		// 虚拟账号每次启动全新构造、不落盘，无旧冷却可自愈（ClearPenalty 不适用）。
 	}

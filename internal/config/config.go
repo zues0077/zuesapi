@@ -115,6 +115,9 @@ type CustomChannel struct {
 	APIKey  string   `json:"api_key"`  // Bearer key；空表示上游无鉴权
 	Models  []string `json:"models"`   // 该实例提供的模型 id（用于 /v1/models 与路由命中）
 	Rate    float64  `json:"rate"`     // 费率倍率：0=免费优先；<0=未知（排最后）；>0=按值排序
+	// MaxConcurrency 该实例的并发上限（0 = 不限制）。
+	// 免费逆向源（网页版 DeepSeek/Kimi 等）并发一高极易触发风控，建议设 1~2。
+	MaxConcurrency int `json:"max_concurrency,omitempty"`
 }
 
 // Config 顶层配置。
@@ -662,6 +665,14 @@ func (c *Config) normalize() error {
 				}
 			}
 			cc.Models = models
+			// 并发上限：0=不限制；负数按 0 处理；上限 32（再多只会把免费源打爆）。
+			if cc.MaxConcurrency < 0 || cc.MaxConcurrency > 32 {
+				if cc.MaxConcurrency > 32 {
+					cc.MaxConcurrency = 32
+				} else {
+					cc.MaxConcurrency = 0
+				}
+			}
 			clean = append(clean, cc)
 		}
 		c.CustomChannels = clean
