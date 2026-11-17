@@ -106,6 +106,17 @@ func ParseListen(s string) (Listen, error) {
 	return Listen{Host: host, Port: port}, nil
 }
 
+// CustomChannel 用户自定义的 OpenAI 兼容上游实例（D 任务）。
+// 每个实例在装配期变成一个虚拟账号（ApiHost=BaseURL, AccessToken=APIKey, UID=Name），
+// 注入 customopenai 渠道的 Pool，天然参与 A 自动选渠 / E 多候选。
+type CustomChannel struct {
+	Name    string   `json:"name"`     // 实例唯一标识（= 虚拟账号 UID，= 模型前缀里的渠道组内 id）
+	BaseURL string   `json:"base_url"` // OpenAI 兼容基址，含 /v1，不带尾斜杠（如 http://host:8800/v1）
+	APIKey  string   `json:"api_key"`  // Bearer key；空表示上游无鉴权
+	Models  []string `json:"models"`   // 该实例提供的模型 id（用于 /v1/models 与路由命中）
+	Rate    float64  `json:"rate"`     // 费率倍率：0=免费优先；<0=未知（排最后）；>0=按值排序
+}
+
 // Config 顶层配置。
 type Config struct {
 	Listen Listen `json:"listen"`
@@ -240,6 +251,10 @@ type Config struct {
 	// 空串或未列出的渠道直连。主要用途：给有区域限制的渠道走代理。
 	Proxies map[string]string `json:"proxies,omitempty"`
 
+	// CustomChannels 用户自定义 OpenAI 兼容上游实例（D 任务）。
+	// 空切片 = 不启用该渠道，运行期与 v0.1.13 完全一致。面板配置后重启生效。
+	CustomChannels []CustomChannel `json:"custom_channels,omitempty"`
+
 	// RefreshIntervalMinutes 面板「模型列表和费率」的后台自动刷新间隔（分钟）。
 	// 模型列表与费率都随上游变动，且面板依赖它们展示，故每 N 分钟统一拉一篇。
 	// 0 = 默认 30 分钟；Normalize 钳制到 5～1440（5 分钟以下会打爆上游，
@@ -290,6 +305,7 @@ func Default() *Config {
 	c.Compat.DefaultChannel = "workbuddy"
 	c.Compat.MaxTokensCap = 32000
 	c.Proxies = map[string]string{}
+	c.CustomChannels = []CustomChannel{}
 	c.SessionSticky = true
 	c.SessionStickyTTL = 30
 	c.SessionStickyGC = 5
@@ -613,6 +629,42 @@ func (c *Config) normalize() error {
 			return fmt.Errorf("proxies[%s]: 不支持的代理协议 %q（仅 http/https/socks5）", k, u.Scheme)
 		}
 		c.Proxies[k] = v
+	}
+	// 自定义渠道清洗：name 唯一非空、base_url 为 http/https、模型 id 去空、rate 归一。
+	{
+		seen := make(map[string]bool, len(c.CustomChannels))
+		clean := make([]CustomChannel, 0, len(c.CustomChannels))
+		for _, cc := range c.CustomChannels {
+			cc.Name = strings.TrimSpace(cc.Name)
+			if cc.Name == "" {
+				continue
+			}
+			if seen[cc.Name] {
+				return fmt.Errorf("custom_channels: 实例名重复 %q", cc.Name)
+			}
+			seen[cc.Name] = true
+			cc.BaseURL = strings.TrimRight(strings.TrimSpace(cc.BaseURL), "/")
+			cc.APIKey = strings.TrimSpace(cc.APIKey)
+			if cc.BaseURL != "" {
+				u, err := url.Parse(cc.BaseURL)
+				if err != nil || u.Scheme == "" || u.Host == "" {
+					return fmt.Errorf("custom_channels[%s]: 无效 base_url %q（应为 http://host:port/v1）", cc.Name, cc.BaseURL)
+				}
+				if u.Scheme != "http" && u.Scheme != "https" {
+					return fmt.Errorf("custom_channels[%s]: 不支持的协议 %q（仅 http/https）", cc.Name, u.Scheme)
+				}
+			}
+			models := make([]string, 0, len(cc.Models))
+			for _, m := range cc.Models {
+				m = strings.TrimSpace(m)
+				if m != "" {
+					models = append(models, m)
+				}
+			}
+			cc.Models = models
+			clean = append(clean, cc)
+		}
+		c.CustomChannels = clean
 	}
 	if c.Region == "" {
 		c.Region = "cn"

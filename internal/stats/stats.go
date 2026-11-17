@@ -569,7 +569,7 @@ var channelKind = map[string]bool{
 	string(provider.Qoder): true, string(provider.QoderCN): true, string(provider.QoderCOM): true,
 	string(provider.QwenWork): true, string(provider.MonkeyCode): true,
 	string(provider.Raccoon): true, string(provider.Loomy): true,
-	string(provider.GLM): true,
+	string(provider.GLM): true, string(provider.CustomOpenAI): true,
 }
 
 // traeKinds 为 Trae 系渠道集合（TraeWork + TraeCode 共用账号与积分池——上游只为

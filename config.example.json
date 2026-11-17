@@ -35,5 +35,14 @@
     }
   },
   "proxies": {
-  }
+  },
+  "custom_channels": [
+    {
+      "name": "my中转",
+      "base_url": "http://127.0.0.1:8800/v1",
+      "api_key": "sk-xxx",
+      "models": ["model-a", "model-b"],
+      "rate": 0
+    }
+  ]
 }

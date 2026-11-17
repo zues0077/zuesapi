@@ -21,6 +21,7 @@ import (
 
 	"workbuddy-api/internal/auth"
 	"workbuddy-api/internal/config"
+	"workbuddy-api/internal/customopenai"
 	"workbuddy-api/internal/ledger"
 	"workbuddy-api/internal/login"
 	"workbuddy-api/internal/login_glm"
@@ -352,6 +353,19 @@ func sortChannelsByOrder[T any](items []T, kindOf func(T) provider.Kind) {
 // Loomy 一期也不提供手动签到：上游未提供额度或签到端点。
 func noExplicitCheckin(k provider.Kind) bool {
 	return k == provider.WorkBuddyAI || k == provider.QwenWork || k == provider.MonkeyCode || k == provider.Raccoon || k == provider.Loomy
+}
+
+// isVirtualAccount 报告该账号是否为「虚拟账号」——由装配期注入、磁盘上没有
+// 对应 auth 文件（FilePath 为空）的账号，例如自定义 OpenAI 兼容渠道的每个实例。
+//
+// AGENTS.md 不变量 21：虚拟账号不得进入任何「能把它弄没」的路径（删除 / 停用 / 改名），
+// 也不参与积分刷新。
+//
+// 判据用「渠道声明」而不是单看 FilePath 为空：FilePath 为空的账号在测试装配里也会
+// 出现（单测直接造 Auth），只看它会把普通渠道也判成虚拟（实测 app 包 3 个用例红）。
+// 与旧 oczen 的写法一致（rt.Kind == provider.Oczen），只是改成通用谓词。
+func isVirtualAccount(au *auth.Auth) bool {
+	return au != nil && provider.Kind(au.Kind) == provider.CustomOpenAI
 }
 
 func (a *App) findRuntimeAuth(uid string) (*Runtime, *auth.Auth) {
@@ -1571,6 +1585,10 @@ func (a *App) RefreshCredits(uid string) (int64, error) {
 	if rt == nil || au == nil {
 		return 0, fmt.Errorf("unknown account %s", uid)
 	}
+	// 虚拟账号无积分概念（自定义上游的额度不由本工具管理），面板显示「积分不适用」。
+	if isVirtualAccount(au) {
+		return 0, fmt.Errorf("账号 %s 无积分概念，不适用", uid)
+	}
 	log.Printf("credits refresh start platform=%s uid=%s", rt.Kind, uid)
 	usable, expiring, unusable, err := a.creditTotals(rt, au)
 	if err != nil {
@@ -1605,6 +1623,10 @@ func (a *App) RefreshAll() RefreshSummary {
 		ps := PlatformSummary{Accounts: []AccountRefresh{}}
 		for _, st := range rt.Pool.List() {
 			au := rt.Pool.AuthByUID(st.UID)
+			// 虚拟账号无积分可刷：纳入只会产生一条无意义的失败记录（不变量 21）。
+			if isVirtualAccount(au) {
+				continue
+			}
 			// 凭据可用性判据：accessToken 或 refreshToken 任一非空即可。
 			// glm 的 accessToken 允许为空（凭据本体是 refresh_token，见 LoadGLMDir），
 			// 只查 accessToken 会把它误判成「no token」而永不刷新。
@@ -1656,10 +1678,15 @@ type AccountRefresh struct {
 }
 
 // RemoveAccount 删除账号（auth 文件 + 内存池）。
+// RemoveAccount 删除账号（auth 文件 + 内存池）。
+// 虚拟账号（无 auth 文件，由装配期注入，如自定义渠道）硬拒，见 AGENTS.md 不变量 21。
 func (a *App) RemoveAccount(uid string) error {
 	rt, au := a.findRuntimeAuth(uid)
 	if rt == nil || au == nil {
 		return fmt.Errorf("unknown account %s", uid)
+	}
+	if isVirtualAccount(au) {
+		return fmt.Errorf("账号 %s 是虚拟账号（由 config 装配生成），不支持删除；请在面板改配置后重启", uid)
 	}
 	if au.FilePath != "" {
 		_ = os.Remove(au.FilePath)
@@ -1671,9 +1698,13 @@ func (a *App) RemoveAccount(uid string) error {
 
 // DisableAccount 停用/启用账号。
 func (a *App) DisableAccount(uid string, disabled bool) error {
-	rt, _ := a.findRuntimeAuth(uid)
+	rt, au := a.findRuntimeAuth(uid)
 	if rt == nil || rt.Pool == nil {
 		return fmt.Errorf("unknown account %s", uid)
+	}
+	// 虚拟账号不可停用：无 auth 文件 ⇒ 重启即复活，且停用等于把该自定义上游整条下线。
+	if isVirtualAccount(au) {
+		return fmt.Errorf("账号 %s 是虚拟账号，不可停用/启用；请在面板改配置后重启", uid)
 	}
 	rt.Pool.SetDisabled(uid, disabled)
 	if disabled {
@@ -2131,6 +2162,53 @@ func (a *App) SetProxies(proxies map[string]string) error {
 	return nil
 }
 
+// SetCustomChannels 保存用户自定义 OpenAI 兼容上游实例配置。
+// 校验规则与 config.normalize 对齐；保存后**重启生效**（Runtime 在装配期构造，
+// 动态增删渠道需重建 runtimes/handler/gateway 多处引用，最小闭环不做热更新）。
+func (a *App) SetCustomChannels(channels []config.CustomChannel) error {
+	seen := make(map[string]bool, len(channels))
+	clean := make([]config.CustomChannel, 0, len(channels))
+	for _, cc := range channels {
+		cc.Name = strings.TrimSpace(cc.Name)
+		cc.BaseURL = strings.TrimRight(strings.TrimSpace(cc.BaseURL), "/")
+		cc.APIKey = strings.TrimSpace(cc.APIKey)
+		if cc.Name == "" {
+			return fmt.Errorf("实例名不能为空")
+		}
+		if seen[cc.Name] {
+			return fmt.Errorf("实例名重复：%s", cc.Name)
+		}
+		seen[cc.Name] = true
+		if cc.BaseURL != "" {
+			u, err := url.Parse(cc.BaseURL)
+			if err != nil || u.Scheme == "" || u.Host == "" {
+				return fmt.Errorf("实例 %s base_url 无效：%q", cc.Name, cc.BaseURL)
+			}
+			if u.Scheme != "http" && u.Scheme != "https" {
+				return fmt.Errorf("实例 %s base_url 协议 %q 不支持（仅 http/https）", cc.Name, u.Scheme)
+			}
+		}
+		models := make([]string, 0, len(cc.Models))
+		for _, m := range cc.Models {
+			m = strings.TrimSpace(m)
+			if m != "" {
+				models = append(models, m)
+			}
+		}
+		cc.Models = models
+		clean = append(clean, cc)
+	}
+	a.mu.Lock()
+	a.cfg.CustomChannels = clean
+	err := config.Save(a.cfg, a.cfgPath)
+	a.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	log.Printf("自定义渠道配置已保存：%d 个实例（重启后生效）", len(clean))
+	return nil
+}
+
 // SetAccountNickname 修改账号显示名：写回 auth 文件 + 池内即时生效。
 func (a *App) SetAccountNickname(uid, nickname string) error {
 	nickname = strings.TrimSpace(nickname)
@@ -2288,6 +2366,10 @@ type State struct {
 	// Proxies 单渠道上游代理（只读，保存走 POST /api/config/proxies）。
 	Proxies map[string]string `json:"proxies"`
 
+	// CustomChannels 用户自定义 OpenAI 兼容上游实例（只读，保存走 POST /api/config/custom_channels）。
+	// 保存后重启生效（渠道 Runtime 在装配期构造）。api_key 原样回显供编辑，前端掩码显示。
+	CustomChannels []config.CustomChannel `json:"custom_channels"`
+
 	// Growth 成长中心自动化开关（只读，保存走 POST /api/config/growth）。
 	//
 	// 四项均**默认关闭**：它们会真实改变账号状态（兑换档位、消耗抽奖次数、
@@ -2353,6 +2435,7 @@ func (a *App) GetState() State {
 	for k, v := range a.cfg.Proxies {
 		st.Proxies[k] = v
 	}
+	st.CustomChannels = append([]config.CustomChannel(nil), a.cfg.CustomChannels...)
 	st.Accounts = a.accountViews()
 	st.Growth = a.GrowthConfig()
 	st.GrowthSupported = a.GrowthSupported()
@@ -2858,9 +2941,9 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 	})
 	mux.HandleFunc("POST /api/config/compat", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			DefaultChannel string            `json:"default_channel"`
-			MaxTokensCap   int               `json:"max_tokens_cap"`
-			ModelMap       map[string]string `json:"model_map"`
+			DefaultChannel string              `json:"default_channel"`
+			MaxTokensCap   int                 `json:"max_tokens_cap"`
+			ModelMap       map[string]string   `json:"model_map"`
 			CustomModels   map[string][]string `json:"custom_models"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
@@ -2880,6 +2963,41 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	})
+	mux.HandleFunc("POST /api/config/custom_channels", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Channels []config.CustomChannel `json:"channels"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			apiError(w, http.StatusBadRequest, "请求体解析失败: "+err.Error())
+			return
+		}
+		if err := a.SetCustomChannels(req.Channels); err != nil {
+			apiError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "restart_required": true})
+	})
+	// 拉取自定义渠道对端的模型列表（面板「拉取模型」用）。
+	//
+	// 必须由后端代发：① 浏览器直连几乎必被 CORS 挡死；② api_key 不必在前端跨域
+	// 请求里裸奔。安全面与 ChatStream 一致——这个 base_url 本来就是用户自己填、
+	// 网关随后也会去请求的地址，不引入新的出站能力。
+	mux.HandleFunc("POST /api/config/custom_channels/probe", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			BaseURL string `json:"base_url"`
+			APIKey  string `json:"api_key"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			apiError(w, http.StatusBadRequest, "请求体解析失败: "+err.Error())
+			return
+		}
+		models, perr := customopenai.ProbeModels(r.Context(), req.BaseURL, req.APIKey, 10*time.Second)
+		if perr != nil {
+			apiError(w, http.StatusBadGateway, perr.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"models": models})
 	})
 	// 成长中心自动化开关（四项，默认全关）。保存后热更新到调度器，无需重启。
 	mux.HandleFunc("POST /api/config/growth", func(w http.ResponseWriter, r *http.Request) {

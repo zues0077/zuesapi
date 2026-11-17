@@ -248,7 +248,9 @@ func (h *Handler) pickWithSticky(rt *Runtime, model string) *auth.Auth {
 		if acct != nil {
 			status, ok := rt.Pool.Status(sticky.uid)
 			modelCooled := ok && status.ModelCooling != nil && status.ModelCooling[model].After(time.Now())
-			if ok && !status.Cooling && !status.Disabled && !modelCooled {
+			// 账号声明了模型集却不含该模型 → 不能复用（自定义渠道多实例时各实例
+			// 上游不同，粘到没有该模型的号会一直 404）。Models 为空的内置渠道恒通过。
+			if ok && !status.Cooling && !status.Disabled && !modelCooled && acct.SupportsModel(model) {
 				log.Printf("sticky route platform=%s uid=%s count=%d/%d",
 					rt.Kind, sticky.uid, sticky.reqCount, sticky.maxReqs)
 				return acct
@@ -308,6 +310,12 @@ func (h *Handler) sessionPick(rt *Runtime, model, sessKey string) *auth.Auth {
 	acct := rt.Pool.AuthByUID(uid)
 	if acct == nil {
 		// 账号已从池中消失：解绑，让该会话重新分配。
+		h.sessions.Unbind(scope)
+		return nil
+	}
+	// 绑定的号不支持当前模型（自定义渠道多实例、各实例模型集不同）：
+	// 解绑后交给普通选号按模型集过滤，避免把请求发给没有该模型的上游。
+	if !acct.SupportsModel(model) {
 		h.sessions.Unbind(scope)
 		return nil
 	}

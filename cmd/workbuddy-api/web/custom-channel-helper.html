@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>自定义渠道配置生成器 · workbuddy-api</title>
+<style>
+  :root{
+    --bg:#f6f7f9; --card:#fff; --fg:#1f2937; --muted:#6b7280; --line:#e5e7eb;
+    --pri:#2563eb; --pri-d:#1d4ed8; --ok:#059669; --warn:#b45309; --code:#f3f4f6;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{ --bg:#0f172a; --card:#1e293b; --fg:#e2e8f0; --muted:#94a3b8; --line:#334155;
+           --pri:#3b82f6; --pri-d:#2563eb; --ok:#34d399; --warn:#fbbf24; --code:#0b1220; }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif;}
+  .wrap{max-width:980px;margin:0 auto;padding:26px 18px 60px}
+  h1{font-size:21px;margin:0 0 6px}
+  .sub{color:var(--muted);margin:0 0 18px}
+  .steps{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 18px;padding:0;list-style:none;counter-reset:s}
+  .steps li{counter-increment:s;background:var(--card);border:1px solid var(--line);border-radius:999px;
+            padding:5px 12px 5px 30px;position:relative;font-size:13px;color:var(--muted)}
+  .steps li::before{content:counter(s);position:absolute;left:6px;top:50%;transform:translateY(-50%);
+            width:18px;height:18px;border-radius:50%;background:var(--pri);color:#fff;font-size:11px;
+            display:flex;align-items:center;justify-content:center}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin:0 0 14px}
+  .card h2{font-size:15px;margin:0 0 12px}
+  label.f{display:block;font-size:12px;color:var(--muted);margin:0 0 5px}
+  input,select,textarea{width:100%;padding:9px 11px;border:1px solid var(--line);border-radius:8px;
+       background:var(--bg);color:var(--fg);font:13px/1.5 ui-monospace,Consolas,monospace}
+  input:focus,select,textarea:focus{outline:2px solid color-mix(in srgb,var(--pri) 35%,transparent);outline-offset:1px}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  .grid3{display:grid;grid-template-columns:2fr 1fr 1fr;gap:12px}
+  @media(max-width:720px){ .grid,.grid3{grid-template-columns:1fr} }
+  .btn{display:inline-flex;align-items:center;gap:6px;padding:8px 14px;border-radius:8px;border:1px solid var(--line);
+       background:var(--card);color:var(--fg);cursor:pointer;font-size:13px}
+  .btn:hover{border-color:var(--pri)}
+  .btn.pri{background:var(--pri);border-color:var(--pri);color:#fff}
+  .btn.pri:hover{background:var(--pri-d)}
+  .btn.mini{padding:4px 9px;font-size:12px}
+  .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .hint{color:var(--muted);font-size:12px;margin:8px 0 0}
+  .hint b{color:var(--fg)}
+  .pill{display:inline-flex;align-items:center;gap:5px;padding:3px 9px;border-radius:999px;
+        background:var(--code);border:1px solid var(--line);font-size:12px;cursor:pointer;user-select:none}
+  .pill.on{background:color-mix(in srgb,var(--pri) 16%,transparent);border-color:var(--pri);color:var(--pri)}
+  .chips{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0 0}
+  .info{background:var(--code);border-radius:10px;padding:12px 14px;margin:10px 0 0;font-size:13px}
+  .info dl{margin:0;display:grid;grid-template-columns:88px 1fr;gap:6px 10px}
+  .info dt{color:var(--muted);font-size:12px}
+  .info dd{margin:0;word-break:break-all}
+  .info a{color:var(--pri);text-decoration:none}
+  .info a:hover{text-decoration:underline}
+  pre{background:var(--code);border:1px solid var(--line);border-radius:10px;padding:12px 14px;
+      overflow:auto;font:12.5px/1.6 ui-monospace,Consolas,monospace;margin:10px 0 0;max-height:280px}
+  table{width:100%;border-collapse:collapse;font-size:12.5px}
+  th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--muted);font-weight:600;white-space:nowrap}
+  td code{background:var(--code);padding:1px 5px;border-radius:4px;font-size:12px}
+  details summary{cursor:pointer;font-weight:600;font-size:14px;padding:4px 0}
+  .warnbox{border-left:3px solid var(--warn);background:color-mix(in srgb,var(--warn) 8%,transparent);
+           padding:10px 14px;border-radius:0 8px 8px 0;margin:12px 0 0;font-size:13px}
+  .ok{color:var(--ok)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>自定义渠道配置生成器</h1>
+  <p class="sub">在你的电脑上把配置填好 → 复制一段 JSON → 粘到飞牛面板「＋ 自定义渠道 → 从 JSON 导入」。网关在飞牛上，所以<b>模型列表要在飞牛面板里点「拉取模型」自动取</b>，这里填的只是备用。</p>
+
+  <ol class="steps">
+    <li>选平台</li><li>填 api_key</li><li>选/填模型</li><li>复制配置</li><li>粘到飞牛面板</li>
+  </ol>
+
+  <section class="card">
+    <h2>① 你要接哪个平台？</h2>
+    <select id="platform"></select>
+    <div class="info" id="pinfo"></div>
+    <p class="hint">选不到你的平台？选最后一项「其他 / 自建」，自己填 base_url 即可——只要它提供 <code>POST {base_url}/chat/completions</code> 就行。</p>
+  </section>
+
+  <section class="card">
+    <h2>② api_key</h2>
+    <div class="row">
+      <input id="key" type="password" placeholder="粘贴你的 API Key（形如 sk-... 或 一串十六进制）" style="flex:1;min-width:260px">
+      <button class="btn mini" id="toggleKey">显示</button>
+    </div>
+    <p class="hint">key 只存在这个网页里（内存），不会上传到任何地方——这个文件本身不发网络请求。无鉴权的本地服务（Ollama/LM Studio）留空即可。</p>
+  </section>
+
+  <section class="card">
+    <h2>③ 模型 id</h2>
+    <div class="chips" id="chips"></div>
+    <div class="row" style="margin-top:10px">
+      <input id="manual" placeholder="手填，逗号分隔，如 gpt-4o-mini, gpt-4o" style="flex:1;min-width:260px">
+    </div>
+    <p class="hint">这里的候选项只是**常见示例**，各平台会随时增删模型。<b>最准的做法</b>：粘到飞牛面板后点「拉取模型」，它会真的向对端 <code>/models</code> 取一次列表。</p>
+  </section>
+
+  <section class="card">
+    <h2>④ 名称与倍率</h2>
+    <div class="grid3">
+      <div>
+        <label class="f">名称（唯一，仅作标识）</label>
+        <input id="name" placeholder="如 deepseek">
+      </div>
+      <div>
+        <label class="f">倍率 rate</label>
+        <input id="rate" type="number" step="0.01" value="0">
+      </div>
+      <div>
+        <label class="f">模型前缀（自动）</label>
+        <input id="prefix" readonly value="customopenai">
+      </div>
+    </div>
+    <p class="hint">rate：<b>0</b> = 免费/最便宜，自动选渠时优先；<b>正数</b> = 按倍率从低到高；<b>负数</b> = 未知，排最后。你自己买的付费 key 建议填实际倍率（比如官方 1.0），这样自动选渠会优先用免费渠道。</p>
+  </section>
+
+  <section class="card">
+    <h2>⑤ 复制这段配置</h2>
+    <pre id="out"></pre>
+    <div class="row" style="margin-top:10px">
+      <button class="btn pri" id="copy">复制 JSON</button>
+      <button class="btn" id="download">下载 .json</button>
+      <span class="hint" id="msg" style="margin:0"></span>
+    </div>
+    <div class="warnbox">
+      粘到飞牛：面板 → 账号管理 → 右上 <b>「＋ 自定义渠道」</b> → <b>「从 JSON 导入」</b> → 粘贴 → 点「拉取模型」勾选 → <b>添加</b> → <b>重启网关</b>生效。
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>各平台怎么填（完整教程）</h2>
+    <table>
+      <thead><tr><th>平台</th><th>base_url</th><th>去哪拿 key</th><th>常见模型（示例）</th></tr></thead>
+      <tbody id="tbl"></tbody>
+    </table>
+    <div class="warnbox" style="margin-top:14px">
+      <b>三个最容易踩的坑</b>：<br>
+      1. <b>base_url 结尾的 <code>/v1</code> 别丢也别多写</b>。网关会拼成 <code>{base_url}/chat/completions</code>，多一个或少一个都会 404。<br>
+      2. <b>火山方舟不填模型名，填「推理接入点 ID」</b>（形如 <code>ep-2024xxxx-xxxxx</code>），在控制台创建接入点后才有。<br>
+      3. <b>模型 id 区分大小写</b>，且必须和对端返回的一字不差（比如硅基流动的 <code>Qwen/Qwen2.5-7B-Instruct</code> 带斜杠和大小写）。
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>常见问题</h2>
+    <details><summary>为什么这个工具不能直接「拉取模型」？</summary>
+      <p class="hint">因为它是纯本地网页：浏览器访问别的域名时会被 CORS 拦掉（大多数 AI 平台不允许网页跨域调它们的接口）。所以拉取模型这件事交给飞牛上的网关做——它没有 CORS 限制，面板里的「拉取模型」就是干这个的。</p>
+    </details>
+    <details><summary>为什么保存后要重启网关？</summary>
+      <p class="hint">自定义渠道的运行时是在网关启动时按配置装配出来的（每个实例对应池里一个虚拟账号）。改动配置需要重启一次才能生效。重启后可以在「账号管理」看到这个渠道的虚拟账号（带 🔒，不可删除/停用——删除请回「＋ 自定义渠道」弹层里操作）。</p>
+    </details>
+    <details><summary>加进来之后，客户端怎么调用？</summary>
+      <p class="hint">模型名写成 <code>customopenai/&lt;模型id&gt;</code>，例如 <code>customopenai/deepseek-chat</code>。<code>/v1/models</code> 会把这些名字带倍率后缀一起列出来，直接复制即可。</p>
+    </details>
+    <details><summary>多个渠道之间怎么选？</summary>
+      <p class="hint">同一次请求只会走一个账号。多个自定义渠道都声明了同一个模型时，由挑号策略决定（默认"临期优先"，自定义账号额度都是 0，实际按名称排序）；不同模型则按你配的模型集精确匹配，不会串到别的上游。</p>
+    </details>
+    <details><summary>能接「豆包工作」「通义 App」这类客户端吗？</summary>
+      <p class="hint">不能直接接——它们没有开放 API。要接豆包模型请用「火山方舟」（官方 API）；要接网页版逆向项目（如 webai2api 类）也行，只要那个项目对外暴露了 OpenAI 兼容端点，把它的地址填进 base_url 即可。</p>
+    </details>
+  </section>
+</div>
+
+<script>
+// 平台表：base 只用官方文档口径，models 仅作示例（真实以 /models 为准）。
+const P = [
+  { id:"deepseek", label:"DeepSeek 官方", base:"https://api.deepseek.com/v1",
+    site:"https://www.deepseek.com", keyUrl:"https://platform.deepseek.com/api_keys",
+    models:["deepseek-chat","deepseek-reasoner"], tip:"国内直连，价格便宜；deepseek-chat 是通用对话，deepseek-reasoner 是推理模型。" },
+  { id:"kimi", label:"月之暗面 Kimi", base:"https://api.moonshot.cn/v1",
+    site:"https://platform.moonshot.cn", keyUrl:"https://platform.moonshot.cn/console/api-keys",
+    models:["moonshot-v1-8k","moonshot-v1-32k","moonshot-v1-128k"], tip:"长文本强项；模型名里的 8k/32k/128k 是上下文长度档位。" },
+  { id:"zhipu", label:"智谱 GLM（开放平台）", base:"https://open.bigmodel.cn/api/paas/v4",
+    site:"https://bigmodel.cn", keyUrl:"https://bigmodel.cn/usercenter/proj-mgmt/apikeys",
+    models:["glm-4-flash","glm-4-plus","glm-4-air"], tip:"注意 base_url 结尾是 /v4 不是 /v1（这是它自己的版本号，照样兼容 OpenAI 协议）。glm-4-flash 有免费额度。" },
+  { id:"qwen", label:"通义千问（DashScope 兼容模式）", base:"https://dashscope.aliyuncs.com/compatible-mode/v1",
+    site:"https://bailian.console.aliyun.com", keyUrl:"https://bailian.console.aliyun.com/?tab=model#/api-key",
+    models:["qwen-plus","qwen-turbo","qwen-max","qwen-long"], tip:"必须用「兼容模式」这个路径，普通 DashScope 路径不兼容 OpenAI 协议。" },
+  { id:"ark", label:"火山方舟（豆包模型）", base:"https://ark.cn-beijing.volces.com/api/v3",
+    site:"https://console.volcengine.com/ark", keyUrl:"https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey",
+    models:["ep-请填你的推理接入点ID"], tip:"模型位置填「推理接入点 ID」（ep- 开头），不是模型名——先在控制台「在线推理」里创建接入点。" },
+  { id:"siliconflow", label:"硅基流动 SiliconFlow", base:"https://api.siliconflow.cn/v1",
+    site:"https://cloud.siliconflow.cn", keyUrl:"https://cloud.siliconflow.cn/account/ak",
+    models:["Qwen/Qwen2.5-7B-Instruct","deepseek-ai/DeepSeek-V3"], tip:"模型 id 带「厂商/模型」斜杠且区分大小写；部分小模型免费。" },
+  { id:"openai", label:"OpenAI 官方", base:"https://api.openai.com/v1",
+    site:"https://platform.openai.com", keyUrl:"https://platform.openai.com/api-keys",
+    models:["gpt-4o-mini","gpt-4o","o3-mini"], tip:"国内直连通常需要代理，可在面板「设置 → 渠道上游代理」给这个渠道单独配代理。" },
+  { id:"openrouter", label:"OpenRouter（聚合中转）", base:"https://openrouter.ai/api/v1",
+    site:"https://openrouter.ai", keyUrl:"https://openrouter.ai/settings/keys",
+    models:["openai/gpt-4o-mini","anthropic/claude-3.5-sonnet","deepseek/deepseek-chat"], tip:"一个 key 可调上百家模型，模型名带厂商前缀；有少量免费模型（名字带 :free）。" },
+  { id:"gemini", label:"Google Gemini（OpenAI 兼容端点）", base:"https://generativelanguage.googleapis.com/v1beta/openai",
+    site:"https://aistudio.google.com", keyUrl:"https://aistudio.google.com/apikey",
+    models:["gemini-2.0-flash","gemini-1.5-pro"], tip:"一定用 /v1beta/openai 这个兼容端点，原生路径不兼容 OpenAI 协议。" },
+  { id:"ollama", label:"Ollama（本机/局域网）", base:"http://127.0.0.1:11434/v1",
+    site:"https://ollama.com", keyUrl:"https://ollama.com/download",
+    models:["qwen2.5:7b","llama3.2:3b"], tip:"无需 key。注意：网关跑在飞牛上，所以 127.0.0.1 指的是飞牛自己；电脑上的 Ollama 要填电脑的局域网 IP，如 http://192.168.1.50:11434/v1。" },
+  { id:"lmstudio", label:"LM Studio（本机）", base:"http://127.0.0.1:1234/v1",
+    site:"https://lmstudio.ai", keyUrl:"https://lmstudio.ai",
+    models:["local-model"], tip:"无需 key；先在 LM Studio 里开启 Local Server。同样注意 127.0.0.1 的归属问题。" },
+  { id:"vllm", label:"vLLM / llama.cpp（自建）", base:"http://127.0.0.1:8000/v1",
+    site:"https://docs.vllm.ai", keyUrl:"https://docs.vllm.ai",
+    models:["你的模型名"], tip:"端口按你的启动参数改（vLLM 默认 8000、llama.cpp server 默认 8080 但需 --api 或 /v1 兼容模式）。" },
+  { id:"oneapi", label:"one-api / new-api 中转站", base:"https://你的中转域名/v1",
+    site:"https://github.com/songquanpeng/one-api", keyUrl:"https://你的中转域名",
+    models:["gpt-4o-mini"], tip:"令牌在站点「令牌」页生成；模型名按站点「渠道」页支持的写。" },
+  { id:"custom", label:"其他 / 自建（自己填 base_url）", base:"", site:"", keyUrl:"",
+    models:[], tip:"只要它提供 POST {base_url}/chat/completions 且回 OpenAI 格式就能接。" },
+];
+
+const $ = (id) => document.getElementById(id);
+let picked = new Set();
+
+function init(){
+  const sel = $("platform");
+  P.forEach((p,i)=>{ const o=document.createElement("option"); o.value=i; o.textContent=p.label; sel.appendChild(o); });
+  $("tbl").innerHTML = P.map(p=>`<tr>
+      <td><b>${esc(p.label)}</b></td>
+      <td><code>${esc(p.base||"（自己填）")}</code></td>
+      <td>${p.keyUrl?`<a href="${esc(p.keyUrl)}" target="_blank" rel="noreferrer">打开控制台</a>`:"—"}</td>
+      <td>${p.models.length?p.models.map(m=>`<code>${esc(m)}</code>`).join(" "):"—"}</td>
+    </tr>`).join("");
+  sel.onchange = ()=>apply(parseInt(sel.value,10));
+  apply(0);
+  $("toggleKey").onclick = ()=>{ const k=$("key"); const t=k.type==="password"; k.type=t?"text":"password"; $("toggleKey").textContent=t?"隐藏":"显示"; };
+  ["key","manual","name","rate"].forEach(id=>$(id).addEventListener("input",render));
+  $("copy").onclick = copy;
+  $("download").onclick = download;
+  render();
+}
+
+function apply(i){
+  const p = P[i] || P[P.length-1];
+  picked = new Set();
+  $("name").value = p.id === "custom" ? "" : p.id;
+  if (p.base) { /* base 直接体现在输出里 */ }
+  $("manual").value = "";
+  $("pinfo").innerHTML = `<dl>
+      <dt>base_url</dt><dd><code>${esc(p.base||"（在下面自己填）")}</code>
+        ${p.base?'<button class="btn mini" id="fillBase" style="margin-left:8px">复制</button>':""}</dd>
+      <dt>拿 key</dt><dd>${p.keyUrl?`<a href="${esc(p.keyUrl)}" target="_blank" rel="noreferrer">${esc(p.keyUrl)}</a>`:"无需 key"}</dd>
+      <dt>官网</dt><dd>${p.site?`<a href="${esc(p.site)}" target="_blank" rel="noreferrer">${esc(p.site)}</a>`:"—"}</dd>
+      <dt>注意</dt><dd>${esc(p.tip)}</dd>
+      <dt>base 自定义</dt><dd><input id="baseCustom" placeholder="${esc(p.base||"http://127.0.0.1:8800/v1")}" value="${esc(p.base)}"></dd>
+    </dl>`;
+  const fb=$("fillBase"); if(fb) fb.onclick=()=>{ navigator.clipboard.writeText(p.base); $("msg").textContent="base_url 已复制"; };
+  $("baseCustom").addEventListener("input", render);
+  // 模型 chips
+  $("chips").innerHTML = p.models.map(m=>`<span class="pill" data-m="${esc(m)}">${esc(m)}</span>`).join("")
+    || `<span class="hint" style="margin:0">这个平台没有预置模型，请手填或在飞牛面板点「拉取模型」</span>`;
+  $("chips").querySelectorAll(".pill").forEach(el=>{
+    el.onclick = ()=>{ const m=el.dataset.m; if(picked.has(m)){picked.delete(m);el.classList.remove("on");} else {picked.add(m);el.classList.add("on");} render(); };
+  });
+  render();
+}
+
+function currentBase(){
+  const el=$("baseCustom");
+  return (el && el.value || "").trim().replace(/\/+$/,"");
+}
+
+function currentModels(){
+  const manual = $("manual").value.split(/[,\s]+/).map(s=>s.trim()).filter(Boolean);
+  return [...new Set([...picked, ...manual])];
+}
+
+function render(){
+  const ch = {
+    name: $("name").value.trim() || "custom",
+    base_url: currentBase(),
+    api_key: $("key").value.trim(),
+    models: currentModels(),
+    rate: Number.isFinite(parseFloat($("rate").value)) ? parseFloat($("rate").value) : 0,
+  };
+  $("out").textContent = JSON.stringify({ channels:[ch] }, null, 2);
+}
+
+async function copy(){
+  const txt = $("out").textContent;
+  try{ await navigator.clipboard.writeText(txt); $("msg").textContent="已复制 ✓"; }
+  catch{
+    // file:// 打开时 navigator.clipboard 常被禁用，退回到 execCommand
+    const ta = document.createElement("textarea");
+    ta.value = txt; ta.style.position="fixed"; ta.style.opacity="0";
+    document.body.appendChild(ta); ta.select();
+    try{ document.execCommand("copy"); $("msg").textContent="已复制 ✓"; }
+    catch{ $("msg").textContent="复制失败，请手动全选下面这段"; }
+    ta.remove();
+  }
+  setTimeout(()=>$("msg").textContent="",2500);
+}
+
+function download(){
+  const blob = new Blob([$("out").textContent], {type:"application/json"});
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "custom-channel.json";
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+function esc(s){ return String(s==null?"":s).replace(/[&<>"']/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+
+init();
+</script>
+</body>
+</html>

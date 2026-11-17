@@ -49,7 +49,11 @@ type Auth struct {
 	UID          string
 	EnterpriseID string
 	Nickname     string
-	FilePath     string // 来源文件；refresh 后原子写回此处
+	// Models 该账号可用的模型集（**仅自定义 OpenAI 兼容渠道的虚拟账号**使用）。
+	// 空 = 不限制。一个 Kind 承载多个自定义实例时，各实例声明的模型集可能不同，
+	// 选号必须按模型过滤，否则请求会被发给「没有该模型」的上游（实测静默走错上游）。
+	Models   []string `json:"models,omitempty"`
+	FilePath string   // 来源文件；refresh 后原子写回此处
 }
 
 // Lock 供同进程内其他包（upstream.RefreshToken）在改写 Auth 字段期间加锁。
@@ -107,6 +111,24 @@ func (a *Auth) NeedsRefresh(within time.Duration) bool {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return a.NeedsRefreshLocked(within)
+}
+
+// SupportsModel 报告该账号是否声明支持 model。
+//
+// Models 为空表示「不限制」（所有内置渠道的账号都是这样，行为与改造前完全一致）。
+// 只有用户自定义 OpenAI 兼容渠道的虚拟账号会带上各自的模型集：同一渠道下不同实例
+// 可能指向完全不同的上游，把 A 的模型发给 B 只会拿到 404（或更糟：被 B 静默回落到
+// 默认模型）。
+func (a *Auth) SupportsModel(model string) bool {
+	if a == nil || len(a.Models) == 0 || model == "" {
+		return true
+	}
+	for _, m := range a.Models {
+		if m == model {
+			return true
+		}
+	}
+	return false
 }
 
 // Parse 兼容两种磁盘形态：

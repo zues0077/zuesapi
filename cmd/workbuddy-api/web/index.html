@@ -77,6 +77,8 @@
             title="一次粘贴多条凭据（可直接粘「导出全部账号」的文件），逐条回执、只重载一次">⇪ 批量 JSON 导入</button>
           <button class="btn small" id="btnExportAll" style="grid-column:3;grid-row:3"
             title="把全部账号导出成一个 JSON 文件，可整份粘回批量导入">⇩ 导出全部账号</button>
+          <button class="btn primary alt custom" id="btnAddCustomChannelEntry" style="grid-column:4;grid-row:3;grid-column:span 1"
+            title="接入任意 OpenAI 兼容上游（填 base_url + api_key，可拉取模型列表自动填写）">＋ 自定义渠道</button>
         </div>
       </div>
     </div>
@@ -434,7 +436,8 @@
           </div>
           <div class="hint" style="margin-bottom:8px;padding:8px 10px;border-left:2px solid var(--info);background:var(--bg-soft,rgba(0,0,0,.03))">
             <b>「模型名」怎么填？</b> 别猜、别手敲——用下方输入框的<b>下拉候选</b>直接选，那里列出的是各渠道当前真实可用的模型名（含费率），选中的就是正确写法。<br>
-            · <b>渠道名</b>固定是这几种：<code>workbuddy</code>、<code>traework</code>、<code>traecode</code>、<code>qodercn</code>、<code>workbuddyai</code>、<code>raccoon</code>（小浣熊）、<code>glm</code>、<code>qwenwork</code>。<br>
+            · <b>渠道名</b>固定是这几种：<code>workbuddy</code>、<code>workbuddyai</code>、<code>traework</code>、<code>traecode</code>、<code>qodercn</code>、<code>qodercom</code>、<code>qwenwork</code>（千问办公）、<code>glm</code>（智谱清言）、<code>monkeycode</code>、<code>raccoon</code>（小浣熊）、<code>loomy</code>、<code>customopenai</code>（自定义渠道）。<br>
+            · <b>自定义渠道</b>：模型名写 <code>customopenai/&lt;模型id&gt;</code>，其中「模型 id」必须与你<b>在设置里为那个实例填写的模型列表</b>一致（不是随便起，对端上游返回什么就填什么）；没在「自定义渠道」区添加实例时，这个前缀不可用。<br>
             · <b>小浣熊模型</b>要保持 <code>sn-</code> 前缀，如 <code>raccoon/sn-sensenova-6-8-flash</code>、<code>raccoon/sn-glm-5-3-flash</code>；去掉前缀会被上游当成未知模型。<br>
             · <b>其余渠道</b>用裸名即可，如 <code>workbuddy/glm-5.2</code>、<code>qodercn/kimi-k3</code>。<br>
             · 不确定就点开「费率」页看模型清单，或从上方下拉候选中选一个。
@@ -560,10 +563,135 @@
         <div class="hint" id="proxyErr" style="color:var(--danger)"></div>
       </div>
 
+      <!-- 自定义渠道的添加/管理入口已移到「账号管理」页右上角的「＋ 自定义渠道」
+           （用户要求：它本质是添加账号，不该藏在设置里）。 -->
+
     </div>
     <div class="modal-actions">
       <button class="btn small" id="btnSettingsCancel">取消</button>
       <button class="btn small primary" id="btnSettingsSave">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 自定义渠道弹层：添加/管理 OpenAI 兼容上游（入口在「账号管理」右上角） -->
+<div class="overlay hidden" id="customChannelOverlay">
+  <div class="modal">
+    <div class="modal-title">自定义渠道（OpenAI 兼容上游）</div>
+    <div class="modal-body">
+      <div class="hint" style="margin:0 0 10px;padding:8px 10px;border-left:2px solid var(--info);background:var(--bg-soft,rgba(0,0,0,.03))">
+        <b>能接什么</b>：任何提供 <code>POST {base_url}/chat/completions</code> 且返回 OpenAI 格式的服务——
+        官方/云厂商（OpenAI、DeepSeek、Kimi、智谱、通义、火山方舟、硅基流动、OpenRouter、Gemini 的 OpenAI 兼容端点…）、
+        自建推理（Ollama <code>/v1</code>、LM Studio、vLLM、llama.cpp）、中转站（one-api / new-api 等）都行。<br>
+        <b>要填什么</b>：base_url（通常以 <code>/v1</code> 结尾）+ api_key + 模型 id。模型 id 不用猜——
+        点<b>「拉取模型」</b>会自动向对端 <code>/models</code> 取列表并勾选。
+      </div>
+
+      <!-- 从电脑上的生成器导入（推荐路径：key 在电脑上查，配置粘过来） -->
+      <details class="cc-details" id="ccImportBox">
+        <summary>从 JSON 导入（推荐：用电脑上的「自定义渠道配置生成器」填好再粘进来）</summary>
+        <div class="hint" style="margin:8px 0">
+          生成器：用浏览器打开 <code>你的网关地址/custom-channel-helper.html</code>（例如
+          <code>http://192.168.1.246:7865/custom-channel-helper.html</code>），在<b>任何电脑</b>上都能用，
+          无需安装。选平台 → 自动带出 base_url 与取 key 地址 → 粘 key → 选模型 → 复制 JSON。
+        </div>
+        <textarea id="ccImportText" rows="5" spellcheck="false"
+          placeholder='{"channels":[{"name":"deepseek","base_url":"https://api.deepseek.com/v1","api_key":"sk-...","models":[],"rate":0}]}'></textarea>
+        <div class="row" style="margin-top:8px">
+          <button type="button" class="btn small" id="btnImportJSON">导入并填入</button>
+          <span class="hint" id="ccImportMsg" style="margin:0">模型可留空，导入后会尝试自动拉取</span>
+        </div>
+      </details>
+
+      <!-- 已有实例列表 -->
+      <div class="cfg-section" id="ccExistingWrap" style="margin:0 0 12px">
+        <div class="cfg-heading">已添加的渠道</div>
+        <div id="ccExisting" class="proxy-list"></div>
+        <div class="hint" id="ccExistingEmpty" style="margin:0">还没有自定义渠道。下面的表单可以添加第一个。</div>
+      </div>
+
+      <div class="cfg-heading">添加一个渠道</div>
+      <div class="row">
+        <label class="lbl wide">快速填充</label>
+        <select class="input grow" id="ccPreset">
+          <option value="">— 选一个常见平台，自动填 base_url —</option>
+        </select>
+      </div>
+      <div class="row" style="margin-top:6px">
+        <label class="lbl wide">名称</label>
+        <input class="input grow" id="ccName" spellcheck="false" placeholder="唯一标识，如 deepseek（用于模型前缀 customopenai，可任意）">
+      </div>
+      <div class="row" style="margin-top:6px">
+        <label class="lbl wide">base_url</label>
+        <input class="input grow" id="ccBase" spellcheck="false" placeholder="https://api.deepseek.com/v1">
+      </div>
+      <div class="row" style="margin-top:6px">
+        <label class="lbl wide">api_key</label>
+        <input class="input grow" id="ccKey" type="password" spellcheck="false" autocomplete="new-password" placeholder="sk-... ；无鉴权的本地服务可留空">
+      </div>
+      <div class="row" style="margin-top:8px">
+        <label class="lbl wide">模型</label>
+        <div class="grow">
+          <button type="button" class="btn small" id="btnProbeModels">拉取模型</button>
+          <span class="hint" id="ccProbeMsg" style="margin-left:8px">先填好 base_url / api_key 再点</span>
+        </div>
+      </div>
+      <div id="ccModelList" class="cc-model-list" style="margin:6px 0 0"></div>
+      <div class="row" style="margin-top:6px">
+        <label class="lbl wide">手动补</label>
+        <input class="input grow" id="ccModelsManual" spellcheck="false" placeholder="拉不到时手填，逗号分隔，如 gpt-4o-mini, gpt-4o">
+      </div>
+      <div class="row" style="margin-top:6px">
+        <label class="lbl wide">倍率</label>
+        <input class="input" id="ccRate" type="number" step="0.01" value="0" style="width:110px">
+        <span class="hint" style="margin-left:8px">0 = 免费/最便宜，自动选渠时优先；正数按倍率排序；负数=未知排最后</span>
+      </div>
+      <div class="hint" id="ccErr" style="color:var(--danger);margin-top:6px"></div>
+      <div class="hint" style="margin-top:6px">保存后需<b>重启网关</b>生效（配置文件写入 custom_channels）。</div>
+
+      <!-- 详细教程：各平台 base_url / 取 key / 常见模型 -->
+      <details class="cc-details" style="margin-top:10px">
+        <summary>各平台怎么填（完整教程）</summary>
+        <table class="cc-table">
+          <thead><tr><th>平台</th><th>base_url</th><th>去哪拿 key</th><th>常见模型（示例，以拉取结果为准）</th></tr></thead>
+          <tbody>
+            <tr><td><b>DeepSeek</b></td><td><code>https://api.deepseek.com/v1</code></td>
+                <td>platform.deepseek.com → API keys</td><td><code>deepseek-chat</code> <code>deepseek-reasoner</code></td></tr>
+            <tr><td><b>月之暗面 Kimi</b></td><td><code>https://api.moonshot.cn/v1</code></td>
+                <td>platform.moonshot.cn → API Key 管理</td><td><code>moonshot-v1-8k/32k/128k</code></td></tr>
+            <tr><td><b>智谱 GLM</b></td><td><code>https://open.bigmodel.cn/api/paas/v4</code></td>
+                <td>bigmodel.cn → API Keys</td><td><code>glm-4-flash</code> <code>glm-4-plus</code>（flash 有免费额度）</td></tr>
+            <tr><td><b>通义千问</b></td><td><code>https://dashscope.aliyuncs.com/compatible-mode/v1</code></td>
+                <td>bailian.console.aliyun.com → API-KEY</td><td><code>qwen-plus</code> <code>qwen-turbo</code> <code>qwen-max</code>（必须走 compatible-mode）</td></tr>
+            <tr><td><b>火山方舟（豆包）</b></td><td><code>https://ark.cn-beijing.volces.com/api/v3</code></td>
+                <td>console.volcengine.com/ark → API Key</td><td>填<b>推理接入点 ID</b>（<code>ep-</code> 开头），不是模型名</td></tr>
+            <tr><td><b>硅基流动</b></td><td><code>https://api.siliconflow.cn/v1</code></td>
+                <td>cloud.siliconflow.cn → API 密钥</td><td><code>Qwen/Qwen2.5-7B-Instruct</code>（带斜杠、区分大小写）</td></tr>
+            <tr><td><b>OpenAI</b></td><td><code>https://api.openai.com/v1</code></td>
+                <td>platform.openai.com → API keys</td><td><code>gpt-4o-mini</code> <code>gpt-4o</code>（国内需给该渠道配代理）</td></tr>
+            <tr><td><b>OpenRouter</b></td><td><code>https://openrouter.ai/api/v1</code></td>
+                <td>openrouter.ai/keys</td><td><code>openai/gpt-4o-mini</code>；免费模型名带 <code>:free</code></td></tr>
+            <tr><td><b>Gemini 兼容端点</b></td><td><code>https://generativelanguage.googleapis.com/v1beta/openai</code></td>
+                <td>aistudio.google.com/apikey</td><td><code>gemini-2.0-flash</code>（必须用 /v1beta/openai）</td></tr>
+            <tr><td><b>Ollama（自建）</b></td><td><code>http://电脑IP:11434/v1</code></td>
+                <td>无需 key</td><td><code>qwen2.5:7b</code>；<b>127.0.0.1 指飞牛自己</b>，接电脑上的要填局域网 IP</td></tr>
+            <tr><td><b>LM Studio</b></td><td><code>http://电脑IP:1234/v1</code></td>
+                <td>无需 key</td><td><code>local-model</code>（先开启 Local Server）</td></tr>
+            <tr><td><b>vLLM / llama.cpp</b></td><td><code>http://电脑IP:8000/v1</code></td>
+                <td>无需 key 或自设</td><td>你用 <code>--served-model-name</code> 起的名字</td></tr>
+            <tr><td><b>one-api / new-api</b></td><td><code>https://你的中转域名/v1</code></td>
+                <td>站点「令牌」页</td><td>按站点渠道支持填</td></tr>
+          </tbody>
+        </table>
+        <div class="cc-warn">
+          <b>三个最容易踩的坑</b>：①<code>/v1</code> 别丢也别多写（网关会拼 <code>{base_url}/chat/completions</code>，多/少一个都 404）；
+          ②火山方舟填的是<b>推理接入点 ID</b>；③模型 id <b>区分大小写</b>，必须与对端 <code>/models</code> 一字不差。
+        </div>
+      </details>
+    </div>
+    <div class="modal-actions">
+      <button class="btn small" id="btnCustomChannelClose">关闭</button>
+      <button class="btn small primary" id="btnAddCustomConfirm">添加</button>
     </div>
   </div>
 </div>

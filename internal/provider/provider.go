@@ -34,6 +34,10 @@ const (
 	Loomy    Kind = "loomy"
 	TraeCode Kind = "traecode" // Trae 代码版：与 TraeWork 同一上游、共用账号，function=solo_agent
 	GLM      Kind = "glm"      // 智谱清言（chatglm.cn 网页版私有接口，凭据为 chatglm_refresh_token）
+	// CustomOpenAI 用户自定义 OpenAI 兼容上游（D 任务）：base_url + api_key 由面板配置，
+	// 每个实例是 Pool 里一个虚拟账号（ApiHost=base_url, AccessToken=api_key），无登录/签到/刷新。
+	// 单 Kind 承载 N 个实例，client 的 baseURL 从账号字段读，天然参与 A/E 选渠。
+	CustomOpenAI Kind = "customopenai"
 )
 
 func (k Kind) String() string { return string(k) }

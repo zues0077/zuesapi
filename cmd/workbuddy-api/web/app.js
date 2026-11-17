@@ -436,14 +436,14 @@ function renderTopbar() {
 }
 
 // 渠道显示名与 CSS 短类名（后端 group / 费率 channel 均为 provider.Kind）。
-const CH_LABEL = { workbuddy: "WorkBuddyCN", workbuddyai: "WorkBuddyAI", traework: "TraeWork", traecode: "TraeCode", qoder: "Qoder", qodercn: "QoderCN", qodercom: "QoderCOM", qwenwork: "千问办公", glm: "智谱清言", monkeycode: "MonkeyCode", raccoon: "小浣熊", loomy: "Loomy" };
-const CH_CLASS = { workbuddy: "wb", workbuddyai: "wbai", traework: "trae", traecode: "traecode", qoder: "qoder", qodercn: "qodercn", qodercom: "qodercom", qwenwork: "qwenwork", glm: "glm", monkeycode: "monkeycode", raccoon: "raccoon", loomy: "loomy" };
+const CH_LABEL = { workbuddy: "WorkBuddyCN", workbuddyai: "WorkBuddyAI", traework: "TraeWork", traecode: "TraeCode", qoder: "Qoder", qodercn: "QoderCN", qodercom: "QoderCOM", qwenwork: "千问办公", glm: "智谱清言", monkeycode: "MonkeyCode", raccoon: "小浣熊", loomy: "Loomy", customopenai: "自定义渠道" };
+const CH_CLASS = { workbuddy: "wb", workbuddyai: "wbai", traework: "trae", traecode: "traecode", qoder: "qoder", qodercn: "qodercn", qodercom: "qodercom", qwenwork: "qwenwork", glm: "glm", monkeycode: "monkeycode", raccoon: "raccoon", loomy: "loomy", customopenai: "custom" };
 const chLabel = (k) => CH_LABEL[k] || "WorkBuddy";
 const chClass = (k) => CH_CLASS[k] || "wb";
 // 不支持显式签到（手动按钮）的渠道：
 // WorkBuddy 国际版不提供手动签到，而是自动对话保活领日活奖励；
 // 千问办公无签到活动；MonkeyCode / 小浣熊 / Loomy 均无签到端点。
-const NO_EXPLICIT_CHECKIN = new Set(["workbuddyai", "qwenwork", "monkeycode", "raccoon", "loomy"]);
+const NO_EXPLICIT_CHECKIN = new Set(["workbuddyai", "qwenwork", "monkeycode", "raccoon", "loomy", "customopenai"]);
 const noExplicitCheckin = (g) => NO_EXPLICIT_CHECKIN.has(g);
 // 导入型渠道：凭据由本机已登录的官方客户端提供，没有浏览器登录流程（见 internal/app/import_local.go）。
 const IMPORT_LOCAL_CHANNELS = new Set(["monkeycode", "raccoon", "loomy"]);
@@ -456,9 +456,11 @@ const hasProtocolLogin = (ch) => PROTOCOL_LOGIN_CHANNELS.has(ch);
 // 无手动签到渠道的状态文案：国际版是「自动领日活奖励」，千问办公为「无签到」。
 const NO_CHECKIN_TAG = { workbuddyai: "自动领日活奖励" };
 const noCheckinText = (g) => NO_CHECKIN_TAG[g] || "无签到";
-// 无积分概念的渠道：积分区域显示「不适用」，并隐藏刷新积分/明细入口。
-// 当前所有渠道都有积分概念，故为空集；机制保留以备将来接入匿名通道。
-const NO_CREDITS = new Set();
+// 无积分概念的渠道：积分区域显示「不适用」，并隐藏刷新积分/明细/停用/删除入口
+// （后端同样硬拒，见 app.go isVirtualAccount）。
+// customopenai：用户自填 base_url + api_key 的 OpenAI 兼容上游，额度不由本工具管理，
+// 且每个实例是装配期注入的虚拟账号（无凭证文件、不可删/停用/改名）。
+const NO_CREDITS = new Set(["customopenai"]);
 
 // creditsText 账号卡片的积分文案。
 // 拆成「可用 / 不可用 / 临期」三个数字：渠道（如 TraeWork）会下发官方客户端专用的
@@ -1430,6 +1432,7 @@ function promptJSONLogin() {
   if (!sel.options.length) {
     for (const [k, name] of Object.entries(CH_LABEL)) {
       if (k === "traecode") continue; // 与 traework 共账号，不单列
+      if (NO_CREDITS.has(k)) continue; // 虚拟渠道无凭证可粘贴（走"自定义渠道管理区"配置）
       const opt = document.createElement("option");
       opt.value = k; opt.textContent = name;
       sel.appendChild(opt);
@@ -1974,6 +1977,195 @@ function validateProxies() {
   return [proxies, ""];
 }
 
+// ---------- 自定义渠道（OpenAI 兼容上游）----------
+// 入口在「账号管理」右上角的「＋ 自定义渠道」（用户定：本质是添加账号，不藏在设置里）。
+//
+// 交互目标：让不懂技术的人也能接一个上游——
+//   选平台 → 自动填 base_url → 粘 api_key → 点「拉取模型」自动勾出模型 → 添加。
+// 模型 id 是最容易填错的一环（各家用词不同），所以必须有「拉取」，不能只让用户手敲。
+
+// CUSTOM_PRESETS 常见平台的 base_url 预设。只预填 base_url（官方文档口径），
+// api_key 需用户自己去控制台拿，模型由「拉取模型」自动发现。
+// 为什么不做成"自动登录/自动拿 key"：这些平台都没有免交互的公开授权流，
+// 硬做等于把用户凭据托管给我们，收益不抵风险（也不符合本工具"本地自用"的定位）。
+const CUSTOM_PRESETS = [
+  { label: "DeepSeek 官方", base: "https://api.deepseek.com/v1", hint: "key 在 platform.deepseek.com → API keys" },
+  { label: "月之暗面 Kimi", base: "https://api.moonshot.cn/v1", hint: "key 在 platform.moonshot.cn → API Key 管理" },
+  { label: "智谱 GLM（开放平台）", base: "https://open.bigmodel.cn/api/paas/v4", hint: "key 在 bigmodel.cn → API Keys" },
+  { label: "通义千问（DashScope 兼容）", base: "https://dashscope.aliyuncs.com/compatible-mode/v1", hint: "key 在 bailian.console.aliyun.com" },
+  { label: "火山方舟（豆包模型）", base: "https://ark.cn-beijing.volces.com/api/v3", hint: "key 在 console.volcengine.com/ark；模型填推理接入点 ID" },
+  { label: "硅基流动 SiliconFlow", base: "https://api.siliconflow.cn/v1", hint: "key 在 cloud.siliconflow.cn → API 密钥" },
+  { label: "OpenAI 官方", base: "https://api.openai.com/v1", hint: "key 在 platform.openai.com → API keys" },
+  { label: "OpenRouter（聚合中转）", base: "https://openrouter.ai/api/v1", hint: "key 在 openrouter.ai/keys" },
+  { label: "Gemini（OpenAI 兼容端点）", base: "https://generativelanguage.googleapis.com/v1beta/openai", hint: "key 在 aistudio.google.com" },
+  { label: "Ollama（本机）", base: "http://127.0.0.1:11434/v1", hint: "无需 key；先 ollama serve 并在对端拉过模型" },
+  { label: "LM Studio（本机）", base: "http://127.0.0.1:1234/v1", hint: "无需 key；在 LM Studio 里开启 Local Server" },
+  { label: "vLLM / llama.cpp（自建）", base: "http://127.0.0.1:8000/v1", hint: "无需 key 或自设；端口按你的启动参数改" },
+  { label: "one-api / new-api 中转站", base: "https://你的中转域名/v1", hint: "令牌在站点「令牌」页生成" },
+];
+
+// ccProbed 最近一次「拉取模型」得到的 id 列表（勾选框数据源，不落库）。
+let ccProbed = [];
+
+function ccPresetInit() {
+  const sel = $("ccPreset");
+  if (!sel || sel.options.length > 1) return; // 只初始化一次
+  for (const p of CUSTOM_PRESETS) {
+    const o = document.createElement("option");
+    o.value = p.base;
+    o.textContent = p.label;
+    o.dataset.hint = p.hint || "";
+    sel.appendChild(o);
+  }
+}
+
+function openCustomChannelModal() {
+  ccPresetInit();
+  ccProbed = [];
+  $("ccName").value = "";
+  $("ccBase").value = "";
+  $("ccKey").value = "";
+  $("ccModelsManual").value = "";
+  $("ccRate").value = "0";
+  $("ccPreset").value = "";
+  $("ccModelList").innerHTML = "";
+  $("ccProbeMsg").textContent = "先填好 base_url / api_key 再点";
+  $("ccErr").textContent = "";
+  renderCustomExisting();
+  $("customChannelOverlay").classList.remove("hidden");
+}
+
+function closeCustomChannelModal() {
+  $("customChannelOverlay").classList.add("hidden");
+}
+
+// renderCustomExisting 渲染已添加的实例（含删除入口——虚拟账号在账号卡片里是锁定的，
+// 删除只能从这里做）。
+function renderCustomExisting() {
+  const list = state.custom_channels || [];
+  const box = $("ccExisting");
+  $("ccExistingEmpty").classList.toggle("hidden", list.length > 0);
+  box.innerHTML = list.map((cc) => `
+    <div class="row proxy-row cc-exist-row" data-name="${esc(cc.name)}">
+      <span class="badge custom">${esc(cc.name)}</span>
+      <span class="hint grow" style="margin-left:8px;word-break:break-all">${esc(cc.base_url || "(未填 base_url)")}
+        · 模型 ${(cc.models || []).length} 个 · 倍率 ${esc(String(cc.rate ?? 0))}</span>
+      <button type="button" class="btn tiny cc-exist-remove" title="删除该渠道（需重启生效）">删除</button>
+    </div>`).join("");
+}
+
+// probeCustomModels 向对端 /models 拉模型列表（后端代发，避免浏览器 CORS 拦死）。
+async function probeCustomModels() {
+  const base_url = $("ccBase").value.trim().replace(/\/+$/, "");
+  const api_key = $("ccKey").value.trim();
+  if (!base_url) { $("ccErr").textContent = "先填 base_url"; return; }
+  $("ccProbeMsg").textContent = "拉取中…";
+  $("ccErr").textContent = "";
+  try {
+    const res = await api("/api/config/custom_channels/probe", { base_url, api_key });
+    ccProbed = (res && res.models) || [];
+    if (!ccProbed.length) {
+      $("ccProbeMsg").textContent = "对端没返回模型，请手填（见下方「手动补」）";
+      $("ccModelList").innerHTML = "";
+      return;
+    }
+    $("ccProbeMsg").textContent = `拉到 ${ccProbed.length} 个模型，勾选要用的（默认全选）`;
+    $("ccModelList").innerHTML = ccProbed.map((id, i) => `
+      <label class="cc-model-item" title="${esc(id)}">
+        <input type="checkbox" class="cc-model-cb" value="${esc(id)}" checked> ${esc(id)}
+      </label>`).join("")
+      + `<div style="margin-top:6px"><button type="button" class="btn tiny" id="ccSelAll">全选</button>
+         <button type="button" class="btn tiny" id="ccSelNone" style="margin-left:6px">全不选</button></div>`;
+    $("ccSelAll").onclick = () => document.querySelectorAll(".cc-model-cb").forEach((c) => (c.checked = true));
+    $("ccSelNone").onclick = () => document.querySelectorAll(".cc-model-cb").forEach((c) => (c.checked = false));
+  } catch (e) {
+    $("ccProbeMsg").textContent = "拉取失败";
+    $("ccErr").textContent = e.message;
+  }
+}
+
+// collectOneCustom 收集表单并校验，返回 {channel, err}。
+function collectOneCustom() {
+  const name = $("ccName").value.trim();
+  const base_url = $("ccBase").value.trim().replace(/\/+$/, "");
+  const api_key = $("ccKey").value.trim();
+  const rate = parseFloat($("ccRate").value);
+  const checked = [...document.querySelectorAll(".cc-model-cb")].filter((c) => c.checked).map((c) => c.value);
+  const manual = $("ccModelsManual").value.split(/[,\s]+/).map((s) => s.trim()).filter(Boolean);
+  const models = [...new Set([...checked, ...manual])];
+  if (!name) return [null, "名称不能为空（仅作标识，随便起，如 deepseek）"];
+  if ((state.custom_channels || []).some((c) => c.name === name)) return [null, `名称 ${name} 已存在，换一个`];
+  if (!base_url) return [null, "base_url 不能为空"];
+  let u;
+  try { u = new URL(base_url); } catch { return [null, `base_url 无效：${base_url}`]; }
+  if (!["http:", "https:"].includes(u.protocol)) return [null, "base_url 只支持 http/https"];
+  if (!models.length) return [null, "一个模型都没有：点「拉取模型」勾选，或在「手动补」里填模型 id"];
+  return [{ name, base_url, api_key, models, rate: Number.isFinite(rate) ? rate : 0 }, ""];
+}
+
+async function addCustomChannel() {
+  const [ch, err] = collectOneCustom();
+  if (err) { $("ccErr").textContent = err; return; }
+  const next = (state.custom_channels || []).concat([ch]);
+  await saveCustomChannels(next, `已添加「${ch.name}」，重启网关后生效`);
+  $("ccName").value = "";
+  $("ccBase").value = "";
+  $("ccKey").value = "";
+  $("ccModelsManual").value = "";
+  $("ccRate").value = "0";
+  $("ccPreset").value = "";
+  $("ccModelList").innerHTML = "";
+  ccProbed = [];
+  $("ccProbeMsg").textContent = "先填好 base_url / api_key 再点";
+}
+
+async function removeCustomChannel(name) {
+  const next = (state.custom_channels || []).filter((c) => c.name !== name);
+  await saveCustomChannels(next, `已删除「${name}」，重启网关后生效`);
+}
+
+// importCustomJSON 粘贴电脑端「配置生成器」输出的 JSON，填入表单（不直接保存，
+// 让用户确认；模型为空时自动触发一次拉取）。
+// 兼容三种形状：{"channels":[...]}、数组、单个对象。
+function importCustomJSON() {
+  const raw = $("ccImportText").value.trim();
+  const msg = $("ccImportMsg");
+  if (!raw) { msg.textContent = "先粘贴 JSON"; return; }
+  let obj;
+  try { obj = JSON.parse(raw); } catch (e) { msg.textContent = "JSON 解析失败：" + e.message; return; }
+  const arr = Array.isArray(obj) ? obj : (Array.isArray(obj.channels) ? obj.channels : [obj]);
+  const first = arr && arr[0];
+  if (!first || !first.base_url) { msg.textContent = "没找到 base_url，检查是不是生成器输出的格式"; return; }
+  $("ccName").value = first.name || "custom";
+  $("ccBase").value = String(first.base_url).replace(/\/+$/, "");
+  $("ccKey").value = first.api_key || "";
+  $("ccRate").value = String(first.rate ?? 0);
+  const ms = (first.models || []).filter(Boolean);
+  $("ccModelsManual").value = ms.join(", ");
+  $("ccModelList").innerHTML = "";
+  ccProbed = [];
+  if (ms.length) {
+    msg.textContent = `已填入（含 ${ms.length} 个模型），检查后点「添加」`;
+  } else {
+    msg.textContent = "已填入，模型为空，正在自动拉取…";
+    probeCustomModels();
+  }
+  if (arr.length > 1) msg.textContent += `；JSON 里有 ${arr.length} 个渠道，这里只填了第一个，其余请逐个导入`;
+}
+
+async function saveCustomChannels(list, okMsg) {
+  try {
+    const res = await api("/api/config/custom_channels", { channels: list });
+    state.custom_channels = list;
+    renderCustomExisting();
+    $("ccErr").textContent = "";
+    toast((okMsg || "已保存") + (res && res.restart_required ? "（需重启）" : ""), 6000);
+    loadState();
+  } catch (e) {
+    $("ccErr").textContent = e.message;
+  }
+}
+
 async function saveSettings() {
   // 1) 监听地址 + 管理密码（同请求提交：后端先存密码再切监听）
   let host = $("selHost").value;
@@ -2414,6 +2606,29 @@ function bind() {
   $("btnAddAlias").onclick = addAliasFromForm;
   $("btnCompatMulti").onclick = toggleMultiMapEditor;
   $("btnAddMulti").onclick = addMultiAliasFromForm;
+  // 自定义渠道：入口在账号管理页（不是设置里）。添加/删除都在独立弹层里完成。
+  $("btnAddCustomChannelEntry").onclick = openCustomChannelModal;
+  $("btnCustomChannelClose").onclick = closeCustomChannelModal;
+  $("btnAddCustomConfirm").onclick = addCustomChannel;
+  $("btnProbeModels").onclick = probeCustomModels;
+  $("btnImportJSON").onclick = importCustomJSON;
+  $("ccPreset").onchange = () => {
+    const sel = $("ccPreset");
+    const o = sel.options[sel.selectedIndex];
+    if (sel.value) {
+      $("ccBase").value = sel.value;
+      if (!$("ccName").value.trim()) $("ccName").value = (o.textContent || "").replace(/[^\w\u4e00-\u9fa5]+/g, "").slice(0, 16) || "custom";
+      $("ccProbeMsg").textContent = o.dataset.hint || "填好 api_key 后点「拉取模型」";
+      $("ccModelList").innerHTML = "";
+      ccProbed = [];
+    }
+  };
+  $("ccExisting").onclick = (e) => {
+    const btn = e.target.closest(".cc-exist-remove");
+    if (!btn) return;
+    const name = btn.closest(".cc-exist-row").dataset.name;
+    if (name) removeCustomChannel(name);
+  };
   // 别名/候选名回车快捷添加；文本域不绑回车（避免重复提交保存）
   $("aliasName").onkeydown = (e) => { if (e.key === "Enter") addAliasFromForm(); };
   $("multiAliasName").onkeydown = (e) => { if (e.key === "Enter") addMultiAliasFromForm(); };

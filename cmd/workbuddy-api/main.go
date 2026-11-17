@@ -37,6 +37,7 @@ import (
 	"workbuddy-api/internal/app"
 	"workbuddy-api/internal/auth"
 	"workbuddy-api/internal/config"
+	"workbuddy-api/internal/customopenai"
 	"workbuddy-api/internal/gateway"
 	"workbuddy-api/internal/glm"
 	"workbuddy-api/internal/ledger"
@@ -303,12 +304,47 @@ func main() {
 	for _, a := range lmAuths {
 		lmPool.Add(a)
 	}
+	// 自定义 OpenAI 兼容上游（D 任务）：每个 config.custom_channels 实例 = 一个虚拟账号，
+	// ApiHost=base_url、AccessToken=api_key、UID=name、FilePath 空（不落盘 auth 文件、无登录/签到）。
+	// 单 Kind 承载 N 个实例，全部进同一个 pool，天然参与 A 自动选渠 / E 多候选轮换。
+	customUp := customopenai.New()
+	customPool := pool.New("") // 虚拟账号不持久化：FilePath 空，state 不该写盘
+	var customStatic []provider.ModelInfo
+	if len(cfg.CustomChannels) > 0 {
+		// 虚拟账号「永不过期」：ExpiresAt=0 会被 auth.NeedsRefresh 判为已过期，
+		// 从而在每次请求前触发 RefreshToken —— 自定义渠道没有刷新端点，失败即被
+		// 判死号（实测 503 no_healthy_account / 禁用原因 refresh session dead）。
+		// api_key 的生命周期由用户在面板管理，这里显式给一个远未来时间戳绕开刷新。
+		neverExpire := time.Now().AddDate(100, 0, 0).Unix()
+		for _, cc := range cfg.CustomChannels {
+			a := &auth.Auth{
+				Kind:        provider.CustomOpenAI.String(),
+				UID:         cc.Name,
+				ApiHost:     cc.BaseURL,
+				AccessToken: cc.APIKey,
+				ExpiresAt:   neverExpire,
+				// 模型集随账号走：同渠道多个实例的上游可能完全不同，
+				// 选号时按模型过滤，避免把 A 的模型发给 B（见 auth.SupportsModel）。
+				Models: append([]string(nil), cc.Models...),
+			}
+			customPool.Add(a)
+			customUp.RegisterInstance(cc.Name, cc.Models, cc.Rate)
+			for _, m := range cc.Models {
+				m = strings.TrimSpace(m)
+				if m != "" {
+					customStatic = append(customStatic, provider.ModelInfo{ID: m, Name: m, ContextFromAPI: false})
+				}
+			}
+			log.Printf("自定义渠道实例：name=%s base_url=%s models=%d rate=%.2f", cc.Name, cc.BaseURL, len(cc.Models), cc.Rate)
+		}
+		// 虚拟账号每次启动全新构造、不落盘，无旧冷却可自愈（ClearPenalty 不适用）。
+	}
 	// 挑号策略（config.strategy）统一下发到所有渠道的池。
 	// 各渠道共用同一策略：策略是「怎么用账号」的全局偏好，不是渠道特性。
 	// normalize 已校验过合法性，这里 ParseStrategy 不会失败。
 	if st, ok := pool.ParseStrategy(cfg.Strategy); ok {
 		for _, p := range []*pool.Pool{wbPool, trPool, qdPool, wbaPool, qwPool, qcnPool,
-			qcmPool, glmPool, mcPool, rcPool, lmPool} {
+			qcmPool, glmPool, mcPool, rcPool, lmPool, customPool} {
 			p.SetStrategy(st)
 		}
 		log.Printf("账号挑选策略：%s", st.Label())
@@ -336,6 +372,9 @@ func main() {
 	rcUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
 	lmUp := loomy.New()
 	lmUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
+	// customopenai：HTTP 带总超时（非流式兜底），StreamHTTP 无总超时（R35 流式不能被掐断）。
+	customUp.HTTP = &http.Client{Timeout: time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second}
+	customUp.StreamHTTP = &http.Client{}
 	glmUp := glm.New()
 	// ⚠️ 只改 HTTP（非流式）的 Timeout。
 	// **不要**给 glmUp.StreamHTTP 设 Timeout —— 流式请求一旦有整体超时，
@@ -371,7 +410,8 @@ func main() {
 			provider.Loomy.String():       {lmUp.HTTP, lmUp.StreamHTTP},
 			// glm 两个 client 都要传（SetTransportProxy 会**新建** Transport，
 			// 只套 HTTP 会让 StreamHTTP 仍走直连（代理对流式不生效）。
-			provider.GLM.String(): {glmUp.HTTP, glmUp.StreamHTTP},
+			provider.GLM.String():          {glmUp.HTTP, glmUp.StreamHTTP},
+			provider.CustomOpenAI.String(): {customUp.HTTP, customUp.StreamHTTP},
 		}
 	}
 	applyProxies(cfg, proxyClientMap())
@@ -482,6 +522,8 @@ func main() {
 		provider.Raccoon:    {Kind: provider.Raccoon, Pool: rcPool, Upstream: rcUp, StaticModels: raccoon.StaticModels()},
 		provider.Loomy:      {Kind: provider.Loomy, Pool: lmPool, Upstream: lmUp, StaticModels: loomy.StaticModels()},
 		provider.GLM:        {Kind: provider.GLM, Pool: glmPool, Upstream: glmUp, StaticModels: glm.StaticModels()},
+		// 自定义 OpenAI 兼容上游：无 SingleAccount（多实例=多账号，出错在池内轮换，R24 教训）；
+		// StaticModels = 所有实例模型并集（仅用于 /v1/models 展示与本地校验提示，实际按账号路由）。
 		// 注意：GLM **不**置 SingleAccount。
 		//
 		// 早期误判：以为「凭据轮换后不可人工恢复」就该按单账号处理。但
@@ -504,6 +546,17 @@ func main() {
 		provider.Raccoon:     {Kind: provider.Raccoon, Pool: rcPool, Upstream: rcUp, Scheduler: rcSch},
 		provider.Loomy:       {Kind: provider.Loomy, Pool: lmPool, Upstream: lmUp, Scheduler: lmSch},
 		provider.GLM:         {Kind: provider.GLM, Pool: glmPool, Upstream: glmUp, Scheduler: glmSch},
+	}
+	// 仅当配置了自定义实例时才注册 customopenai Runtime —— 零配置时渠道清单与
+	// 面板表现与 v0.1.13 完全一致（不出现空渠道）。无签到/保活/刷新：Scheduler 留空，
+	// 调度启动处不补 go Run（R34 只约束建了 scheduler 的渠道）。
+	if len(cfg.CustomChannels) > 0 {
+		runtimes[provider.CustomOpenAI] = &server.Runtime{
+			Kind: provider.CustomOpenAI, Pool: customPool, Upstream: customUp, StaticModels: customStatic,
+		}
+		appRuntimes[provider.CustomOpenAI] = &app.Runtime{
+			Kind: provider.CustomOpenAI, Pool: customPool, Upstream: customUp,
+		}
 	}
 
 	appInst, err := app.New(app.Options{

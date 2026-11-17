@@ -295,6 +295,11 @@ func (p *Pool) candidates(now time.Time, tried map[string]bool, model string) []
 		if !e.healthyForModel(now, model) {
 			continue
 		}
+		// 账号声明的模型集不含该模型 → 跳过（只有自定义渠道的虚拟账号会声明，
+		// 内置渠道 Models 为空，行为不变）。
+		if !e.a.SupportsModel(model) {
+			continue
+		}
 		out = append(out, e)
 	}
 	return out
