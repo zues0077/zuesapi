@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<style>
+  :root {
+    --bg: #ffffff; --fg: #1f2328; --muted: #6b7280;
+    --line: #e5e7eb; --accent: #2563eb; --ok: #059669; --warn: #b45309; --danger: #dc2626;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1b1f24; --fg: #e6edf3; --muted: #9aa4b2;
+      --line: #30363d; --accent: #4c9aff;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    width: 460px; margin: 0; padding: 14px 16px 16px;
+    background: var(--bg); color: var(--fg);
+    font: 13px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  }
+  h1 { font-size: 14px; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 12px; margin-bottom: 12px; }
+  .site {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; margin-bottom: 10px;
+  }
+  .site .name { font-weight: 600; }
+  .badge {
+    font-size: 11px; padding: 1px 7px; border-radius: 999px;
+    background: var(--accent); color: #fff;
+  }
+  .badge.off { background: var(--muted); }
+  button {
+    font: inherit; cursor: pointer; border-radius: 7px; padding: 6px 12px;
+    border: 1px solid var(--line); background: transparent; color: var(--fg);
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .row { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; flex-wrap: wrap; }
+  textarea {
+    width: 100%; height: 150px; resize: vertical; padding: 8px 10px;
+    font: 12px/1.55 ui-monospace, Consolas, monospace;
+    background: var(--bg); color: var(--fg);
+    border: 1px solid var(--line); border-radius: 7px;
+  }
+  .hint { color: var(--muted); font-size: 12px; }
+  .msg { font-size: 12px; margin-top: 6px; }
+  .msg.ok { color: var(--ok); }
+  .msg.warn { color: var(--warn); }
+  .msg.err { color: var(--danger); }
+  details { margin-top: 10px; }
+  summary { cursor: pointer; color: var(--accent); font-size: 12px; }
+  pre {
+    white-space: pre-wrap; word-break: break-all; font-size: 11px;
+    background: rgba(127,127,127,.08); padding: 8px; border-radius: 6px; margin: 6px 0 0;
+  }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+  <h1>WebAPI 凭证提取器</h1>
+  <div class="sub">在已登录的对应页面点「提取」，结果直接粘进网关面板（或该服务的配置文件）。</div>
+
+  <div class="site">
+    <span class="name" id="siteName">检测中…</span>
+    <span class="badge off" id="siteBadge">未识别</span>
+    <span style="flex:1"></span>
+    <button class="primary" id="btnExtract" disabled>提取</button>
+  </div>
+
+  <div class="row">
+    <button id="btnCopy" disabled>复制结果</button>
+    <button id="btnRaw" disabled>复制原始数据</button>
+    <span class="hint" id="fromHint"></span>
+  </div>
+
+  <textarea id="out" spellcheck="false" placeholder="点上面的「提取」后，格式化好的结果会出现在这里"></textarea>
+  <div class="msg" id="msg"></div>
+
+  <details>
+    <summary>拿到结果后怎么用</summary>
+    <div class="hint" id="usage"></div>
+  </details>
+
+  <script src="popup.js"></script>
+</body>
+</html>

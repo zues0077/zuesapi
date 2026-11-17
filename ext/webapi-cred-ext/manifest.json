@@ -1,0 +1,27 @@
+{
+  "manifest_version": 3,
+  "name": "WebAPI 凭证提取器",
+  "version": "1.0.0",
+  "description": "为 wb2api 网关一键提取网页版模型的登录凭证：DeepSeek / 讯飞星火 Loomy / Gemini / 智谱 GLM / Kimi / 通义千问。支持读取 HttpOnly Cookie。",
+  "permissions": ["cookies", "activeTab", "scripting", "clipboardWrite"],
+  "host_permissions": [
+    "https://chat.deepseek.com/*",
+    "https://*.deepseek.com/*",
+    "https://loomy.xunfei.cn/*",
+    "https://loomyad.xunfei.cn/*",
+    "https://*.xunfei.cn/*",
+    "https://gemini.google.com/*",
+    "https://accounts.google.com/*",
+    "https://chatglm.cn/*",
+    "https://*.chatglm.cn/*",
+    "https://www.kimi.com/*",
+    "https://*.kimi.com/*",
+    "https://kimi.moonshot.cn/*",
+    "https://chat.qwen.ai/*",
+    "https://*.qwen.ai/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "提取网页版凭证"
+  }
+}
