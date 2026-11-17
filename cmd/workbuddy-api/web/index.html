@@ -592,6 +592,15 @@
         转成 <code>OpenAI 兼容接口</code>，再作为<b>webAPI 账号</b>接进网关（与「自定义API」是两条独立的添加路径）。<br>
         <b>区别只在于「跑哪个项目、怎么登录」</b>——下面按推荐顺序排好了。
       </div>
+      <div class="hint" style="margin:0 0 10px;padding:8px 10px;border-left:3px solid var(--primary);background:var(--bg-soft,rgba(0,0,0,.03))">
+        <b>⚠️ 它们不是三个 API。</b>加进来的源最终都变成网关里同一个渠道
+        （<code>customopenai</code>）的实例：<br>
+        · 客户端永远只对接 <b>一个地址</b>（<code>你的地址/v1</code>）+ <b>一个 API-Key</b>；<br>
+        · 网关按模型名分发：<code>customopenai/deepseek-chat</code> → duruoxian，
+        <code>customopenai/gemini-3.5-flash</code> → gemini；<br>
+        · 三个可以只加一个，也可以全加（等价于「多了一个付费源/免费源」，不是多一套接口）。<br>
+        唯一要注意：<b>不同源的模型名别重名</b>，重名会按选号顺序落到其中一个。
+      </div>
 
       <div id="webapiCards"></div>
 
