@@ -2233,7 +2233,7 @@ function renderWebAPICards() {
   const box = $("webapiCards");
   if (!box) return;
   box.innerHTML = WEBAPI_SOURCES.map((s) => `
-    <div class="wa-card">
+    <div class="wa-card" data-src="${esc(s.id)}">
       <div class="wa-head">
         <b>${esc(s.name)}</b>
         <span class="badge webapi">webAPI</span>
@@ -2245,13 +2245,33 @@ function renderWebAPICards() {
       <div class="wa-kv"><span>怎么登录</span><div>${esc(s.login)}</div></div>
       <div class="wa-kv"><span>项目地址</span><div><a href="${esc(s.repo)}" target="_blank" rel="noreferrer">${esc(s.repo)}</a></div></div>
       <div class="row" style="margin-top:8px">
-        <button type="button" class="btn small primary" data-wa="${esc(s.id)}">填入并添加</button>
+        <button type="button" class="btn small primary wa-open">接入这个源</button>
+      </div>
+      <div class="wa-form hidden">
+        <div class="row" style="margin-top:8px">
+          <label class="lbl wide">名称</label>
+          <input class="input grow" data-f="name" value="${esc(s.id)}" spellcheck="false">
+        </div>
+        <div class="row" style="margin-top:6px">
+          <label class="lbl wide">api_key</label>
+          <input class="input grow" data-f="key" placeholder="${esc(s.keyHint)}" spellcheck="false">
+        </div>
+        <div class="row" style="margin-top:6px">
+          <label class="lbl wide">模型</label>
+          <input class="input grow" data-f="models" value="${esc(s.models.join(", "))}" spellcheck="false">
+        </div>
+        <div class="row" style="margin-top:6px">
+          <label class="lbl wide">并发上限</label>
+          <input class="input" data-f="conc" type="number" min="1" max="32" value="2" style="width:110px">
+          <span class="hint" style="margin-left:8px">默认 2，避免免费源被并发打爆</span>
+        </div>
+        <div class="wa-err hint" style="color:var(--danger,#dc2626);margin-top:6px"></div>
+        <div class="row" style="margin-top:8px">
+          <button type="button" class="btn small primary wa-submit">添加为 webAPI 账号</button>
+          <button type="button" class="btn small wa-cancel" style="margin-left:6px">取消</button>
+        </div>
       </div>
     </div>`).join("");
-  box.onclick = (e) => {
-    const b = e.target.closest("[data-wa]");
-    if (b) fillFromWebAPI(b.dataset.wa);
-  };
 }
 
 function openWebAPI() {
@@ -2261,20 +2281,46 @@ function openWebAPI() {
 
 function closeWebAPI() { $("webapiOverlay").classList.add("hidden"); }
 
-// fillFromWebAPI 把某个源的信息预填进「添加自定义渠道」表单，标签固定为 webAPI。
-function fillFromWebAPI(id) {
-  const src = WEBAPI_SOURCES.find((s) => s.id === id);
-  if (!src) return;
-  closeWebAPI();
-  openCustomChannelModal();
-  $("ccName").value = src.id;
-  $("ccBase").value = src.base.replace(/\/+$/, "");
-  $("ccModelsManual").value = src.models.join(", ");
-  $("ccRate").value = "0";
-  $("ccConc").value = "2";           // 免费源默认限并发，避免风控
-  if ($("ccTag")) $("ccTag").value = "webapi";
-  $("ccProbeMsg").textContent = "已按 " + src.name + " 预填，补上 api_key 后点「添加」";
-  $("ccErr").textContent = "";
+// 事件委托：展开/收起内联表单、提交、取消。
+// 走独立入口是刻意的——webAPI 与「自定义API」是两条路：
+// 通用表单要填倍率/类型/拉取模型，对网页反代源纯属噪音；这里只留「key + 模型 + 并发」。
+function bindWebAPIEvents() {
+  const box = $("webapiCards");
+  if (!box) return;
+  box.onclick = async (e) => {
+    const card = e.target.closest(".wa-card");
+    if (!card) return;
+    const form = card.querySelector(".wa-form");
+    const err = card.querySelector(".wa-err");
+    if (e.target.closest(".wa-open")) {
+      form.classList.toggle("hidden");
+      if (!form.classList.contains("hidden")) form.querySelector('[data-f="key"]').focus();
+      return;
+    }
+    if (e.target.closest(".wa-cancel")) { form.classList.add("hidden"); return; }
+    if (!e.target.closest(".wa-submit")) return;
+
+    const id = card.dataset.src;
+    const src = WEBAPI_SOURCES.find((s) => s.id === id);
+    const name = (card.querySelector('[data-f="name"]').value || "").trim() || src.id;
+    const key = (card.querySelector('[data-f="key"]').value || "").trim();
+    const models = (card.querySelector('[data-f="models"]').value || "")
+      .split(/[,\s]+/).map((x) => x.trim()).filter(Boolean);
+    const concRaw = parseInt(card.querySelector('[data-f="conc"]').value, 10);
+    const conc = Number.isFinite(concRaw) && concRaw > 0 ? Math.min(concRaw, 32) : 2;
+
+    if (!models.length) { err.textContent = "模型列表不能为空（可留默认，或用逗号分隔多个）"; return; }
+    const list = (state.custom_channels || []);
+    if (list.some((c) => c.name === name)) { err.textContent = `渠道名「${name}」已存在，请改名`; return; }
+
+    err.textContent = "";
+    const next = list.concat([{
+      name, base_url: src.base.replace(/\/+$/, ""), api_key: key,
+      models, rate: 0, max_concurrency: conc, tag: "webapi",
+    }]);
+    await saveCustomChannels(next, `已添加 webAPI 账号「${name}」，重启网关后生效`);
+    closeWebAPI();
+  };
 }
 
 // importCustomJSON 粘贴电脑端「配置生成器」输出的 JSON，填入表单（不直接保存，
@@ -2768,6 +2814,7 @@ function bind() {
   // 这里不再绑顶部按钮；页面本身仍可通过 /custom-channel-helper.html 打开。
   $("btnOpenWebAPI").onclick = openWebAPI;
   $("btnWebAPIClose").onclick = closeWebAPI;
+  bindWebAPIEvents();
 
   // 弹层通用关闭：点遮罩空白处 / 按 Esc（内容长时按钮可能在下方，必须留退路）
   ["customChannelOverlay", "webapiOverlay"].forEach((id) => {

@@ -589,7 +589,7 @@
     <div class="modal-body">
       <div class="hint" style="margin:0 0 10px;padding:8px 10px;border-left:2px solid var(--info);background:var(--bg-soft,rgba(0,0,0,.03))">
         这三个项目<b>本质是同一件事</b>：在本机或飞牛上跑一个小服务，把网页版模型（DeepSeek / Kimi / GLM / Gemini / Loomy）
-        转成 <code>OpenAI 兼容接口</code>，再把它当作「自定义账号」接进网关。<br>
+        转成 <code>OpenAI 兼容接口</code>，再作为<b>webAPI 账号</b>接进网关（与「自定义API」是两条独立的添加路径）。<br>
         <b>区别只在于「跑哪个项目、怎么登录」</b>——下面按推荐顺序排好了。
       </div>
 
@@ -606,7 +606,7 @@
               gemini-web2api 零鉴权，随便填（如 <code>sk-any</code>）；Loomy 按其文档。</li>
           <li><b>登录平台账号</b>：duruoxian 在面板「浏览器登录」扫码；Loomy 必须先在<b>有屏幕的电脑</b>上扫码，
               再把 <code>loomy-profile/</code> 整份拷进飞牛；gemini 不需要登录。</li>
-          <li><b>填进网关</b>：点下方对应卡片的「填入」，再点「添加」；保存后<b>重启网关</b>生效。</li>
+          <li><b>填进网关</b>：点卡片的「接入这个源」→ 只填 api_key（模型和并发已预填）→「添加为 webAPI 账号」；保存后<b>重启网关</b>生效。</li>
           <li><b>验证</b>：<code>/v1/models</code> 里出现 <code>customopenai/&lt;模型&gt;</code>，
               发一句「只回复两个字：通了」能收到真实回复即成功。账号列表会显示 <b>webAPI</b> 标签。</li>
         </ol>
