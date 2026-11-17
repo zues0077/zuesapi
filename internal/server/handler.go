@@ -327,6 +327,19 @@ func (h *Handler) sessionPick(rt *Runtime, model, sessKey string) *auth.Auth {
 	return acct
 }
 
+// setServedHeaders 在响应头标注实际服务的渠道与账号（uid 截断，不含凭据）。
+//
+// 为什么需要：客户端只看到"费率对不上"却无法判断这次到底走了哪个渠道/账号，
+// 只能回面板翻日志。回写两个头后，`curl -D-` 或浏览器 Network 里一眼可见。
+// 只加元数据、不改响应体，客户端可忽略。
+func setServedHeaders(w http.ResponseWriter, rt *Runtime, acct *auth.Auth) {
+	if w == nil || rt == nil || acct == nil {
+		return
+	}
+	w.Header().Set("X-Served-Channel", rt.Kind.String())
+	w.Header().Set("X-Served-Account", shortUID(acct.UID))
+}
+
 // shortUID 截 uid 前 8 位（日志用；全量 uid 可从 data/state.json 查）。
 func shortUID(s string) string {
 	if len(s) <= 8 {
@@ -975,6 +988,11 @@ rotateLoop:
 			// 会话重绑到**实际成功**的账号：双段哈希只是启发式，可能挑到随后失败/被限流的号，
 			// 真实结果才是权威。绑定后多轮对话会收敛到「对该会话持续成功」的号。
 			h.sessionBind(rt, sessKey, acct)
+			// 响应头回写「这次是谁服务的」：客户端侧排查费率/路由时一眼可见
+			// （此前只有面板能看，客户端完全无从判断）。
+			// 必须放在 Stream 之前：SSE 一旦开始写 body，header 就锁死了，
+			// 而账号正是在这里才最终确定——这是最后一个能安全设置的时点。
+			setServedHeaders(w, rt, acct)
 			if peek.Stream {
 				usage, serr := rt.Upstream.Stream(w, rc, clientModel)
 				// 记 token 流水（成功请求口径；usage 缺失记 0 token 仅计请求数）。
