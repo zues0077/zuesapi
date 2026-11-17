@@ -646,7 +646,13 @@ function renderAccounts() {
     const taskBtn = a.growth
       ? `<span class="icon-op" title="执行成长任务（会真实改变账号状态）" onclick="runTasks('${a.uid}')">★</span>`
       : "";
-    const ops = noCredits
+    // 自定义渠道账号（虚拟账号）也要能冻结/删除：它不是 auths 文件里的凭据，
+    // 而是 config.custom_channels 的一项，所以操作走配置接口并提示重启生效。
+    const isCustom = !!a.custom_tag;
+    const ops = isCustom
+      ? `<span class="icon-op warn" title="冻结：保留配置但不参与选号（重启生效）" onclick="toggleCustomFrozen('${a.uid}')">${a.disabled ? "▶" : "⏸"}</span>
+         <span class="icon-op danger" title="删除该自定义渠道（重启生效）" onclick="removeCustomChannel('${a.uid}')">✕</span>`
+      : noCredits
       ? `<span class="icon-op off" title="固定账号，不可停用/删除" onclick="return false">🔒</span>`
       : `${checkinBtn}
           ${taskBtn}
@@ -655,7 +661,7 @@ function renderAccounts() {
           <span class="icon-op warn" title="${disableTitle}" onclick="toggleDisable('${a.uid}',${a.disabled})">${disableIcon}</span>
           <span class="icon-op danger" title="删除账号" onclick="removeAcct('${a.uid}')">✕</span>`;
     // 显示名：点击直接弹出改名框（无积分渠道降级为普通文本）。
-    const nameHtml = noCredits
+    const nameHtml = (noCredits || isCustom)
       ? `<span class="acct-name">${esc(a.nickname || shortUid(a.uid))}</span>`
       : `<span class="acct-name editable" title="点击修改显示名" onclick="openRename('${a.uid}','${esc(a.nickname || shortUid(a.uid)).replace(/'/g, "&#39;")}')">${esc(a.nickname || shortUid(a.uid))}</span>`;
 
@@ -2294,10 +2300,19 @@ function renderWebAPICards() {
       <div class="wa-kv"><span>API Key</span><div>${esc(s.keyHint)}</div></div>
       <div class="wa-kv"><span>怎么登录</span><div>${esc(s.login)}</div></div>
       <div class="wa-kv"><span>项目地址</span><div><a href="${esc(s.repo)}" target="_blank" rel="noreferrer">${esc(s.repo)}</a></div></div>
-      ${s.bookmarklet ? `<div class="wa-kv"><span>一键取凭证</span><div>
+      ${s.bookmarklet ? `<div class="wa-kv"><span>取凭证</span><div>
+        <div class="hint" style="margin:0 0 6px">
+          <b>下面这个蓝色小按钮是可以拖的</b>（不是普通按钮）：
+          <ol class="wa-steps" style="margin:4px 0 6px">
+            <li>先按 <code>Ctrl+Shift+B</code> 让浏览器<b>显示书签栏</b>（在地址栏下面）</li>
+            <li><b>按住</b>下面这个蓝色按钮，<b>拖到书签栏上松手</b>——书签栏会多出一个名字</li>
+            <li>打开 <code>chat.deepseek.com</code> 并登录，点书签栏那个名字 → 四个字段自动进剪贴板</li>
+            <li>回到本面板：账号管理 → 添加账号 → 手动粘贴凭证</li>
+          </ol>
+          拖不动或不想拖？点 <a href="#" class="wa-copy-bm">复制脚本</a>，在 deepseek 页面按 <code>F12</code> → Console 粘贴回车。
+        </div>
         <a class="btn tiny" href="${buildCredBookmarklet()}" onclick="return false" draggable="true"
-           title="拖动我到浏览器书签栏；以后在 deepseek 网页点一下就自动复制四个字段">🔖 取凭证书签（拖到书签栏）</a>
-        <div class="hint" style="margin-top:4px">拖到书签栏后，在 deepseek 页面点一次即可，不必再开 F12。</div>
+           title="按住我拖到书签栏（先按 Ctrl+Shift+B 显示书签栏）">🔖 拖我到书签栏</a>
       </div></div>` : ""}
       <div class="wa-kv"><span>怎么做</span><div>
         <ol class="wa-steps">${(s.steps || []).map((t) => `<li>${esc(t)}</li>`).join("")}</ol>
@@ -2316,7 +2331,13 @@ function renderWebAPICards() {
         </div>
         <div class="row" style="margin-top:6px">
           <label class="lbl wide">模型</label>
-          <input class="input grow" data-f="models" value="${esc(s.models.join(", "))}" spellcheck="false">
+          <div class="grow">
+            <div class="row">
+              <input class="input grow" data-f="models" value="${esc(s.models.join(", "))}" spellcheck="false">
+              <button type="button" class="btn tiny wa-probe" style="margin-left:6px">拉取模型</button>
+            </div>
+            <div class="hint wa-probe-msg" style="margin-top:4px">模型名会随上游更新，随时点「拉取模型」刷新</div>
+          </div>
         </div>
         <div class="row" style="margin-top:6px">
           <label class="lbl wide">并发上限</label>
@@ -2356,6 +2377,36 @@ function bindWebAPIEvents() {
       return;
     }
     if (e.target.closest(".wa-cancel")) { form.classList.add("hidden"); return; }
+    if (e.target.closest(".wa-copy-bm")) {
+      e.preventDefault();
+      const code = decodeURIComponent(buildCredBookmarklet().replace(/^javascript:/, ""));
+      try { await navigator.clipboard.writeText(code); alert("已复制脚本。\n\n到 chat.deepseek.com 按 F12 → Console 粘贴回车即可。"); }
+      catch (_) { prompt("复制失败，请手动复制：", code); }
+      return;
+    }
+    if (e.target.closest(".wa-probe")) {
+      const src = WEBAPI_SOURCES.find((x) => x.id === card.dataset.src);
+      const msg = card.querySelector(".wa-probe-msg");
+      const btn = e.target.closest(".wa-probe");
+      btn.disabled = true;
+      msg.textContent = "正在向上游拉取模型…";
+      try {
+        const r = await api("/api/config/custom_channels/probe", {
+          base_url: src.base,
+          api_key: (card.querySelector('[data-f="key"]').value || "").trim(),
+        });
+        const models = (r && r.models) || [];
+        if (!models.length) { msg.textContent = "上游没返回模型：确认服务已启动、地址可达"; }
+        else {
+          card.querySelector('[data-f="models"]').value = models.join(", ");
+          msg.textContent = `已拉取 ${models.length} 个模型（已填入上方，可自行删减）`;
+        }
+      } catch (err) {
+        msg.textContent = "拉取失败：" + (err.message || err);
+      }
+      btn.disabled = false;
+      return;
+    }
     if (!e.target.closest(".wa-submit")) return;
 
     const id = card.dataset.src;
@@ -2410,6 +2461,25 @@ function importCustomJSON() {
     probeCustomModels();
   }
   if (arr.length > 1) msg.textContent += `；JSON 里有 ${arr.length} 个渠道，这里只填了第一个，其余请逐个导入`;
+}
+
+// toggleCustomFrozen 冻结/启用某个自定义渠道（写 config，重启生效）。
+// 虚拟账号没有 auth 文件，停用不能走 /api/accounts/disable（那条只改内存池，
+// 重启就复位），必须落到配置里才会持久。
+async function toggleCustomFrozen(name) {
+  const list = (state.custom_channels || []).map((c) =>
+    c.name === name ? Object.assign({}, c, { disabled: !c.disabled }) : c);
+  const target = list.find((c) => c.name === name);
+  await saveCustomChannels(list, target && target.disabled
+    ? `已冻结「${name}」，重启网关后不再参与调用`
+    : `已启用「${name}」，重启网关后恢复调用`);
+}
+
+// removeCustomChannel 删除整条自定义渠道配置。
+async function removeCustomChannel(name) {
+  if (!confirm(`删除自定义渠道「${name}」？\n\n会同时移除它的 base_url / api_key / 模型配置，重启生效。`)) return;
+  const list = (state.custom_channels || []).filter((c) => c.name !== name);
+  await saveCustomChannels(list, `已删除「${name}」，重启网关后生效`);
 }
 
 async function saveCustomChannels(list, okMsg) {

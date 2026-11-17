@@ -119,6 +119,9 @@ type CustomChannel struct {
 	// 不参与任何逻辑，纯展示（用户要求：自定义账号在账号卡片上标出来，
 	// duruoxian 这类网页反代源要换个标注）。
 	Tag string `json:"tag,omitempty"`
+	// Disabled 冻结该实例：仍保留配置（base_url/key/模型），但不注入账号池，
+	// 因此不参与任何选号与调用。用于临时停用某个上游而不想删配置。
+	Disabled bool `json:"disabled,omitempty"`
 	// MaxConcurrency 该实例的并发上限（0 = 不限制）。
 	// 免费逆向源（网页版 DeepSeek/Kimi 等）并发一高极易触发风控，建议设 1~2。
 	MaxConcurrency int `json:"max_concurrency,omitempty"`

@@ -317,6 +317,8 @@ func main() {
 		// api_key 的生命周期由用户在面板管理，这里显式给一个远未来时间戳绕开刷新。
 		neverExpire := time.Now().AddDate(100, 0, 0).Unix()
 		for _, cc := range cfg.CustomChannels {
+			// 冻结的实例仍然注入，只是立刻在池里禁用：这样面板上还能看到它、
+			// 还能点「启用」，不会因为不注入而"消失得没法恢复"。
 			a := &auth.Auth{
 				Kind:        provider.CustomOpenAI.String(),
 				UID:         cc.Name,
@@ -328,6 +330,9 @@ func main() {
 				Models: append([]string(nil), cc.Models...),
 			}
 			customPool.Add(a)
+			if cc.Disabled {
+				customPool.Disable(cc.Name, "已冻结（面板设置）")
+			}
 			customUp.RegisterInstance(cc.Name, cc.Models, cc.Rate, cc.MaxConcurrency)
 			for _, m := range cc.Models {
 				m = strings.TrimSpace(m)
