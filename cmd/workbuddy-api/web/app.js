@@ -460,6 +460,17 @@ const noCheckinText = (g) => NO_CHECKIN_TAG[g] || "无签到";
 // （后端同样硬拒，见 app.go isVirtualAccount）。
 // customopenai：用户自填 base_url + api_key 的 OpenAI 兼容上游，额度不由本工具管理，
 // 且每个实例是装配期注入的虚拟账号（无凭证文件、不可删/停用/改名）。
+// PLATFORM_LOGIN ① 区选平台时要提示的登录地址。
+// 为什么单独一张表：① 的下拉 value（deepseek/chatglm/kimi/qwen）与
+// WEBAPI_SOURCES.platforms 的 id（deepseek/glm/kimi/qwen）不一致，
+// 直接复用会错位（曾把更新逻辑挂在「模型平台」上，导致 ① 里选了 DeepSeek 也不提示网址）。
+const PLATFORM_LOGIN = {
+  deepseek: { label: "DeepSeek", url: "https://chat.deepseek.com", tip: "登录后随便发一句话" },
+  chatglm: { label: "智谱 GLM", url: "https://chatglm.cn", tip: "登录后进入对话页" },
+  kimi: { label: "Kimi", url: "https://www.kimi.com", tip: "登录后在对话框发一句话" },
+  qwen: { label: "通义千问", url: "https://chat.qwen.ai", tip: "登录后随便发一句话" },
+};
+
 const NO_CREDITS = new Set(["customopenai"]);
 
 // creditsText 账号卡片的积分文案。
@@ -2390,7 +2401,7 @@ function renderWebAPICards() {
               <option value="qwen">通义千问</option>
             </select>
           </div>
-          <div class="hint wa-login-hint" style="margin-top:4px">「全部平台」会带上四个平台的模型，但上游只对<b>已登录</b>的平台可用。</div>
+          <div class="hint wa-login-hint" style="margin-top:4px">${provHintHTML("deepseek")}</div>
           <div class="row" style="margin-top:6px">
             <label class="lbl wide">平台账号名</label>
             <input class="input grow" data-f="accname" value="我的dsh" spellcheck="false">
@@ -2487,6 +2498,14 @@ function closeWebAPI() { $("webapiOverlay").classList.add("hidden"); }
 function bindWebAPIEvents() {
   const box = $("webapiCards");
   if (!box) return;
+  // 下拉框（① 的平台）值变化不触发 click，必须单独挂 change，否则"选了平台却不带出网址"。
+  box.onchange = (e) => {
+    const sel = e.target.closest(".wa-prov");
+    if (!sel) return;
+    const card = sel.closest(".wa-card");
+    const hint = card && card.querySelector(".wa-login-hint");
+    if (hint) hint.innerHTML = provHintHTML(sel.value);
+  };
   box.onclick = async (e) => {
     const card = e.target.closest(".wa-card");
     if (!card) return;
@@ -2543,6 +2562,12 @@ function bindWebAPIEvents() {
         msg.textContent = "❌ " + (err.message || err);
       }
       btn.disabled = false;
+      return;
+    }
+    // ① 的「平台」切换 → 立刻带出该平台的登录网址
+    if (e.target.closest(".wa-prov")) {
+      const hint = card.querySelector(".wa-login-hint");
+      if (hint) hint.innerHTML = provHintHTML(e.target.closest(".wa-prov").value);
       return;
     }
     // 把书签复制出来的整段 JSON 拆成四个输入框（用户不必自己找哪个值放哪）
@@ -2709,6 +2734,15 @@ async function renameCustomChannel(oldName) {
 // 为什么需要：渠道（config.custom_channels）只是网关的一条路由；
 // 它背后那个反代服务里有没有登录账号是另一回事。账号为 0 时调用会报
 // 「没有可用的账号」，而渠道卡片上原来没有任何入口去补，用户只能删了重建。
+// provHintHTML ① 区"先去哪登录"的提示：直接把网址做成可点链接。
+// 用户反馈：选了平台却不知道要打开哪个网站，只能靠猜。
+function provHintHTML(prov) {
+  const hit = PLATFORM_LOGIN[prov];
+  if (!hit) return "选一个平台，这里会显示要登录的网址。";
+  return `去 <a href="${hit.url}" target="_blank" rel="noreferrer"><b>${hit.url}</b></a> 登录`
+    + `（${esc(hit.tip)}），再用上面的书签/扩展复制凭证。`;
+}
+
 function openWebAPIFor(channelName) {
   openWebAPI();
   const card = document.querySelector(`.wa-card[data-src="${channelName}"]`)
