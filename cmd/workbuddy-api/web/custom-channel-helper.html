@@ -113,8 +113,8 @@
       <div>
         <label class="f">类型（账号卡片上的标注）</label>
         <select id="tag">
-          <option value="custom">自定义</option>
-          <option value="reverse">逆向源</option>
+          <option value="custom">自定义API</option>
+          <option value="webapi">webAPI（网页版反代）</option>
         </select>
       </div>
     </div>
@@ -209,18 +209,18 @@ const P = [
     models:["你的模型名"], tip:"端口按你的启动参数改（vLLM 默认 8000、llama.cpp server 默认 8080 但需 --api 或 /v1 兼容模式）。" },
   { id:"geminiweb", label:"Gemini 网页版（gemini-web2api）", base:"http://127.0.0.1:8081/v1",
     site:"https://github.com/Sophomoresty/gemini-web2api", keyUrl:"https://github.com/Sophomoresty/gemini-web2api",
-    models:["gemini-3.5-flash","gemini-3.5-flash-thinking","gemini-3.5-pro"], tag:"reverse",
+    models:["gemini-3.5-flash","gemini-3.5-flash-thinking","gemini-3.5-pro"], tag:"webapi",
     tip:"单文件 Python、零鉴权（api_keys 为空时随便填 key，如 sk-any）也能用；模型可加 @think=N 后缀调思考深度（0 最深）；支持工具调用/Responses/Gemini 原生端点。跑在飞牛上时用 127.0.0.1，跑在电脑上要填电脑局域网 IP。" },
   { id:"loomyproxy", label:"Loomy Proxy（飞牛 FPK，讯飞星火）", base:"http://<飞牛IP>:19999/v1",
     site:"https://github.com/narrator-z/FnDepot/tree/main/loomyproxy", keyUrl:"https://github.com/narrator-z/FnDepot/tree/main/loomyproxy",
-    models:["loomy"], tag:"reverse",
+    models:["loomy"], tag:"webapi",
     tip:"别人已做好的 fnOS FPK（装到飞牛即可，端口 19999）。登录态是 HttpOnly Cookie，必须在电脑上跑 playwright 扫码登录，把生成的 loomy-profile 目录整份拷到飞牛的数据目录，过期再重做一次。模型名按它 /v1/models 返回的填。" },
   { id:"oneapi", label:"one-api / new-api 中转站", base:"https://你的中转域名/v1",
     site:"https://github.com/songquanpeng/one-api", keyUrl:"https://你的中转域名",
     models:["gpt-4o-mini"], tip:"令牌在站点「令牌」页生成；模型名按站点「渠道」页支持的写。" },
   { id:"webai2api", label:"webai2api 逆向源（duruoxian / foxhui）", base:"http://电脑IP:8800/v1",
     site:"https://github.com/duruoxian/webai2api", keyUrl:"https://github.com/duruoxian/webai2api/releases",
-    models:["deepseek-chat","GLM-5.3","kimi-k3","qwen3.7-plus"], tag:"reverse",
+    models:["deepseek-chat","GLM-5.3","kimi-k3","qwen3.7-plus"], tag:"webapi",
     tip:"把网页版 AI 反代成 OpenAI 兼容 API 的项目。关键：它跑在你的电脑上，网关在飞牛上，所以 base_url 必须填电脑的局域网 IP（如 192.168.1.50:8800），不能填 127.0.0.1；并在电脑防火墙放行该端口。key 用它面板生成的 sk-..." },
   { id:"custom", label:"其他 / 自建（自己填 base_url）", base:"", site:"", keyUrl:"",
     models:[], tip:"只要它提供 POST {base_url}/chat/completions 且回 OpenAI 格式就能接。" },

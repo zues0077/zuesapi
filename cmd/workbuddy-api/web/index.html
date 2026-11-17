@@ -74,8 +74,10 @@
           <!-- 第 3 行：用户自定义（不依赖官方登录，自己填 base_url + key） -->
           <button class="btn primary alt custom" id="btnAddCustomChannelEntry" style="grid-column:1;grid-row:3"
             title="添加一个自定义 OpenAI 兼容上游（填 base_url + api_key，可拉取模型列表）">＋ 增加自定义账号</button>
-          <button class="btn primary alt custom" id="btnOpenGenerator" style="grid-column:2;grid-row:3"
-            title="打开配置生成器：选平台自动填 base_url、给出去哪拿 key 的链接，生成后可直接粘回来导入">🧩 配置生成器</button>
+          <button class="btn primary alt custom" id="btnOpenGenerator" style="grid-column:4;grid-row:4"
+            title="通用配置生成器：选平台自动填 base_url、给出去哪拿 key 的链接，生成后粘回来导入">🧩 配置生成器</button>
+          <button class="btn primary alt webapi" id="btnOpenWebAPI" style="grid-column:5;grid-row:4"
+            title="网页版模型接入（WebAPI）：把 DeepSeek/Kimi/Gemini 等网页版变成免费 OpenAI 接口，含部署教程">🌐 WebAPI 接入</button>
           <button class="btn primary alt" id="btnAddJSON" style="grid-column:1;grid-row:4"
             title="粘贴凭据 JSON 直接添加账号（全渠道兜底，支持嵌套 auths 格式与扁平格式）">⌨ JSON 登录</button>
           <button class="btn primary alt" id="btnAddBatchJSON" style="grid-column:2;grid-row:4"
@@ -577,6 +579,50 @@
   </div>
 </div>
 
+<!-- WebAPI 接入：把网页版模型变成免费 OpenAI 接口（三类开源项目合一入口） -->
+<div class="overlay hidden" id="webapiOverlay">
+  <div class="modal">
+    <div class="modal-title">WebAPI 接入 · 网页版模型变免费 OpenAI 接口</div>
+    <div class="modal-body">
+      <div class="hint" style="margin:0 0 10px;padding:8px 10px;border-left:2px solid var(--info);background:var(--bg-soft,rgba(0,0,0,.03))">
+        这三个项目<b>本质是同一件事</b>：在本机或飞牛上跑一个小服务，把网页版模型（DeepSeek / Kimi / GLM / Gemini / Loomy）
+        转成 <code>OpenAI 兼容接口</code>，再把它当作「自定义账号」接进网关。<br>
+        <b>区别只在于「跑哪个项目、怎么登录」</b>——下面按推荐顺序排好了。
+      </div>
+
+      <div id="webapiCards"></div>
+
+      <details class="cc-details" style="margin-top:10px">
+        <summary>完整教程：从零接入一个 WebAPI 源</summary>
+        <ol class="wa-steps">
+          <li><b>选一个源并在飞牛/电脑上跑起来</b>：能装 FPK 的优先（duruoxian、Loomy 都有现成包），
+              零依赖的 gemini-web2api 直接 <code>pip install httpx &amp;&amp; python gemini_web2api.py</code>。</li>
+          <li><b>确认它在监听</b>：<code>curl http://127.0.0.1:端口/v1/models</code>，返回 <code>{"data":[...]}</code> 即正常；
+              返回 401 也正常（说明要 key）。</li>
+          <li><b>拿到它的 API Key</b>：duruoxian 在管理面板「API Key」页生成 <code>sk-...</code>；
+              gemini-web2api 零鉴权，随便填（如 <code>sk-any</code>）；Loomy 按其文档。</li>
+          <li><b>登录平台账号</b>：duruoxian 在面板「浏览器登录」扫码；Loomy 必须先在<b>有屏幕的电脑</b>上扫码，
+              再把 <code>loomy-profile/</code> 整份拷进飞牛；gemini 不需要登录。</li>
+          <li><b>填进网关</b>：点下方对应卡片的「填入」，再点「添加」；保存后<b>重启网关</b>生效。</li>
+          <li><b>验证</b>：<code>/v1/models</code> 里出现 <code>customopenai/&lt;模型&gt;</code>，
+              发一句「只回复两个字：通了」能收到真实回复即成功。账号列表会显示 <b>webAPI</b> 标签。</li>
+        </ol>
+        <div class="cc-warn">
+          <b>三个必踩的坑</b>：①地址写 <code>127.0.0.1</code> 时它指<b>网关所在的那台机器</b>——服务跑在电脑上就要填电脑的局域网 IP，
+          跑在飞牛上才用 127.0.0.1；②<b>并发别开大</b>：免费源建议「并发上限」设 1~2，否则容易被风控；
+          ③<b>Cookie 会过期</b>：表现为模型列表变空或 401，重做一次登录即可，网关配置不用改。
+        </div>
+        <div class="cc-warn" style="border-left-color:var(--danger,#dc2626)">
+          <b>风险提示</b>：网页版逆向接入可能触发平台风控甚至封号，<b>仅供个人自用</b>，不要对外提供服务。
+        </div>
+      </details>
+    </div>
+    <div class="modal-actions">
+      <button class="btn small" id="btnWebAPIClose">关闭</button>
+    </div>
+  </div>
+</div>
+
 <!-- 自定义渠道弹层：添加/管理 OpenAI 兼容上游（入口在「账号管理」右上角） -->
 <div class="overlay hidden" id="customChannelOverlay">
   <div class="modal">
@@ -650,13 +696,12 @@
         <span class="hint" style="margin-left:8px">0 = 免费/最便宜，自动选渠时优先；正数按倍率排序；负数=未知排最后</span>
       </div>
       <div class="row" style="margin-top:6px">
-      <div class="row" style="margin-top:6px">
         <label class="lbl wide">类型</label>
         <select class="input" id="ccTag" style="width:150px">
-          <option value="custom">自定义</option>
-          <option value="reverse">逆向源</option>
+          <option value="custom">自定义API</option>
+          <option value="webapi">webAPI</option>
         </select>
-        <span class="hint" style="margin-left:8px">仅影响账号卡片上的标签；duruoxian 这类网页反代选「逆向源」</span>
+        <span class="hint" style="margin-left:8px">仅影响账号卡片上的标签；网页版反代（duruoxian / Gemini / Loomy）选「webAPI」</span>
       </div>
       <div class="row" style="margin-top:6px">
         <label class="lbl wide">并发上限</label>

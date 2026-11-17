@@ -586,13 +586,15 @@ code.about-repo:active { transform: translateY(1px); }
 
 /* customopenai 自定义 OpenAI 兼容上游（用户自填 base_url，用中性灰蓝与官方渠道区分） */
 .badge.custom { background: #475569; }
-.badge.reverse { background: #7c3aed; }
+.badge.webapi { background: #7c3aed; }
 .fees .ch-header.custom td { color: #475569; }
 
 /* 自定义渠道弹层的模型勾选区（列宽自适应，模型 id 可能很长） */
 .cc-model-list { display: flex; flex-wrap: wrap; gap: 6px 14px; max-height: 190px; overflow-y: auto; }
 .cc-model-list .cc-model-item { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-family: ui-monospace, monospace; }
 .btn.primary.alt.custom { background: #475569; border-color: #475569; }
+.btn.primary.alt.webapi { background: #7c3aed; border-color: #7c3aed; }
+.btn.primary.alt.webapi:hover { background: #6d28d9; }
 .btn.primary.alt.custom:hover { background: #334155; }
 
 /* 自定义渠道弹层里的折叠区（导入 / 教程） */
@@ -1077,3 +1079,11 @@ code.about-repo:active { transform: translateY(1px); }
   color: var(--ok); font-size: 12px; font-weight: 600;
   background: #dcfce7; border: 1px solid #bbf7d0; padding: 0 6px; border-radius: 6px;
 }
+
+/* WebAPI 接入弹层：每个源一张卡 + 教程步骤 */
+.wa-card { border: 1px solid var(--line, #e5e7eb); border-radius: 10px; padding: 10px 12px; margin: 0 0 10px; }
+.wa-head { display: flex; align-items: center; gap: 8px; }
+.wa-kv { display: grid; grid-template-columns: 76px 1fr; gap: 4px 8px; font-size: 12px; margin-top: 4px; }
+.wa-kv > span { color: var(--muted); }
+.wa-kv a { color: var(--primary); word-break: break-all; }
+.wa-steps { margin: 6px 0 0; padding-left: 20px; font-size: 12.5px; line-height: 1.9; }

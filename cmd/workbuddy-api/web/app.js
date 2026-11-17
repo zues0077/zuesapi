@@ -669,7 +669,7 @@ function renderAccounts() {
     // 自定义渠道账号的来源标签（用户要求：自定义账号要标出来，逆向源换个标注）。
     // 数据由后端 /api/state 的 custom_tag 下发，前端不猜渠道。
     const customTag = a.custom_tag
-      ? `<span class="badge ${a.custom_tag === "reverse" ? "reverse" : "custom"}" style="margin-left:6px;vertical-align:middle">${a.custom_tag === "reverse" ? "逆向源" : "自定义"}</span>`
+      ? `<span class="badge ${a.custom_tag === "webapi" ? "webapi" : "custom"}" style="margin-left:6px;vertical-align:middle">${a.custom_tag === "webapi" ? "webAPI" : "自定义API"}</span>`
       : "";
 
     return `
@@ -2137,6 +2137,96 @@ async function removeCustomChannel(name) {
   await saveCustomChannels(next, `已删除「${name}」，重启网关后生效`);
 }
 
+// ---------- WebAPI 接入（网页版模型 → OpenAI 接口）----------
+// 三类开源项目本质相同（把网页版模型转成 OpenAI 兼容接口），这里合一入口：
+// 用户不用理解它们的技术差异，只要选一个、按教程跑起来、点「填入」即可。
+const WEBAPI_SOURCES = [
+  {
+    id: "duruoxian",
+    name: "duruoxian webai2api",
+    tagline: "DeepSeek / 智谱 / Kimi / 通义 四平台，自带多账号池与自动换号",
+    where: "飞牛 FPK（web2api.fpk）或电脑上跑 exe",
+    base: "http://127.0.0.1:8800/v1",
+    keyHint: "面板「API Key」页生成 sk-...",
+    login: "面板「浏览器登录」扫码（电脑或 SSH 隧道打开管理页）",
+    models: ["deepseek-chat", "deepseek-reasoner", "GLM-5.3", "kimi-k3", "qwen3.7-plus"],
+    alt: "跑在电脑上时把 127.0.0.1 换成电脑局域网 IP（如 192.168.1.50:8800）",
+    repo: "https://github.com/duruoxian/webai2api",
+  },
+  {
+    id: "gemini",
+    name: "gemini-web2api",
+    tagline: "Google Gemini 网页版，零鉴权、单文件、支持工具调用",
+    where: "任意装 Python 的机器：pip install httpx && python gemini_web2api.py",
+    base: "http://127.0.0.1:8081/v1",
+    keyHint: "零鉴权，key 随便填（如 sk-any）",
+    login: "无需登录",
+    models: ["gemini-3.5-flash", "gemini-3.5-flash-thinking", "gemini-3.5-pro"],
+    alt: "默认端口 8081；跨机器访问同样要换局域网 IP",
+    repo: "https://github.com/Sophomoresty/gemini-web2api",
+  },
+  {
+    id: "loomy",
+    name: "Loomy Proxy",
+    tagline: "讯飞星火 Loomy 网页版，FlareSolverr/Playwright 取 Cookie",
+    where: "FnDepot 上有现成 fnOS FPK（端口 19999）",
+    base: "http://127.0.0.1:19999/v1",
+    keyHint: "按其面板/文档生成的 key",
+    login: "必须先在电脑上扫码，把 loomy-profile 拷进飞牛",
+    models: ["loomy"],
+    alt: "登录态过期就要重拷一次 profile",
+    repo: "https://github.com/narrator-z/FnDepot/tree/main/loomyproxy",
+  },
+];
+
+function renderWebAPICards() {
+  const box = $("webapiCards");
+  if (!box) return;
+  box.innerHTML = WEBAPI_SOURCES.map((s) => `
+    <div class="wa-card">
+      <div class="wa-head">
+        <b>${esc(s.name)}</b>
+        <span class="badge webapi">webAPI</span>
+      </div>
+      <div class="hint" style="margin:2px 0 6px">${esc(s.tagline)}</div>
+      <div class="wa-kv"><span>跑在哪</span><div>${esc(s.where)}</div></div>
+      <div class="wa-kv"><span>接口地址</span><div><code>${esc(s.base)}</code><br><span class="hint">${esc(s.alt)}</span></div></div>
+      <div class="wa-kv"><span>API Key</span><div>${esc(s.keyHint)}</div></div>
+      <div class="wa-kv"><span>怎么登录</span><div>${esc(s.login)}</div></div>
+      <div class="wa-kv"><span>项目地址</span><div><a href="${esc(s.repo)}" target="_blank" rel="noreferrer">${esc(s.repo)}</a></div></div>
+      <div class="row" style="margin-top:8px">
+        <button type="button" class="btn small primary" data-wa="${esc(s.id)}">填入并添加</button>
+      </div>
+    </div>`).join("");
+  box.onclick = (e) => {
+    const b = e.target.closest("[data-wa]");
+    if (b) fillFromWebAPI(b.dataset.wa);
+  };
+}
+
+function openWebAPI() {
+  renderWebAPICards();
+  $("webapiOverlay").classList.remove("hidden");
+}
+
+function closeWebAPI() { $("webapiOverlay").classList.add("hidden"); }
+
+// fillFromWebAPI 把某个源的信息预填进「添加自定义渠道」表单，标签固定为 webAPI。
+function fillFromWebAPI(id) {
+  const src = WEBAPI_SOURCES.find((s) => s.id === id);
+  if (!src) return;
+  closeWebAPI();
+  openCustomChannelModal();
+  $("ccName").value = src.id;
+  $("ccBase").value = src.base.replace(/\/+$/, "");
+  $("ccModelsManual").value = src.models.join(", ");
+  $("ccRate").value = "0";
+  $("ccConc").value = "2";           // 免费源默认限并发，避免风控
+  if ($("ccTag")) $("ccTag").value = "webapi";
+  $("ccProbeMsg").textContent = "已按 " + src.name + " 预填，补上 api_key 后点「添加」";
+  $("ccErr").textContent = "";
+}
+
 // importCustomJSON 粘贴电脑端「配置生成器」输出的 JSON，填入表单（不直接保存，
 // 让用户确认；模型为空时自动触发一次拉取）。
 // 兼容三种形状：{"channels":[...]}、数组、单个对象。
@@ -2154,7 +2244,7 @@ function importCustomJSON() {
   $("ccKey").value = first.api_key || "";
   $("ccRate").value = String(first.rate ?? 0);
   $("ccConc").value = String(first.max_concurrency ?? 0);
-  if ($("ccTag")) $("ccTag").value = first.tag === "reverse" ? "reverse" : "custom";
+  if ($("ccTag")) $("ccTag").value = (first.tag === "webapi" || first.tag === "reverse") ? "webapi" : "custom";
   const ms = (first.models || []).filter(Boolean);
   $("ccModelsManual").value = ms.join(", ");
   $("ccModelList").innerHTML = "";
@@ -2625,6 +2715,8 @@ function bind() {
   $("btnAddCustomChannelEntry").onclick = openCustomChannelModal;
   // 配置生成器是独立静态页（同一份 go:embed 资源），新窗口打开便于对照填写。
   $("btnOpenGenerator").onclick = () => window.open("/custom-channel-helper.html", "_blank");
+  $("btnOpenWebAPI").onclick = openWebAPI;
+  $("btnWebAPIClose").onclick = closeWebAPI;
   $("btnCustomChannelClose").onclick = closeCustomChannelModal;
   $("btnAddCustomConfirm").onclick = addCustomChannel;
   $("btnProbeModels").onclick = probeCustomModels;

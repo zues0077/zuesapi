@@ -670,9 +670,11 @@ func (c *Config) normalize() error {
 			}
 			cc.Models = models
 			switch cc.Tag {
-			case "", "custom", "reverse":
+			case "reverse":
+				cc.Tag = "webapi" // 旧值迁移（面板文案已改为 自定义API/webAPI）
+			case "", "custom", "webapi":
 			default:
-				cc.Tag = "" // 未知标签一律按「自定义」处理，不报错（纯展示字段）
+				cc.Tag = "" // 未知标签一律按「自定义API」处理，不报错（纯展示字段）
 			}
 			// 并发上限：0=不限制；负数按 0 处理；上限 32（再多只会把免费源打爆）。
 			if cc.MaxConcurrency < 0 || cc.MaxConcurrency > 32 {
