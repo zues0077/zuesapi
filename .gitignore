@@ -74,3 +74,6 @@ GO多平台发布备忘.md
 rel.json
 rel_resp.json
 asset_resp.json
+
+# fpk 暂存树（scripts/stage_fpk.sh 生成的中间产物，含 14MB 二进制）
+stage-*/
