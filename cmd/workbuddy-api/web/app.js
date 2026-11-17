@@ -2468,7 +2468,9 @@ function bindWebAPIEvents() {
       if (pf) {
         card.querySelector('[data-f="models"]').value = pf.models.join(", ");
         const msg = card.querySelector(".wa-probe-msg");
-        if (msg) msg.textContent = `已按「${pf.label}」填入模型；想确认上游真实清单可点「拉取模型」`;
+        if (msg) msg.textContent = pf.id === "all"
+          ? "已填入四个平台的常用模型；点「拉取模型」可按上游实际已登录的账号校正"
+          : `已按「${pf.label}」填入模型（前提是上游已登录该平台账号，否则调用会 502）`;
       }
       return;
     }
@@ -2551,9 +2553,26 @@ function bindWebAPIEvents() {
           api_key: (card.querySelector('[data-f="key"]').value || "").trim(),
         });
         const models = (r && r.models) || [];
-        if (!models.length) { msg.textContent = "上游没返回模型：确认服务已启动、地址可达"; }
-        else {
-          card.querySelector('[data-f="models"]').value = models.join(", ");
+        const modelsEl = card.querySelector('[data-f="models"]');
+        // 平台过滤：webai2api 的 /v1/models 只返回**已登录账号所属平台**的模型。
+        // 只登了 DeepSeek 却选「智谱 GLM」时，直接覆盖会把清单改成 deepseek 的模型
+        // （用户实测：「点拉取模型都会变成 deepseek」）。所以按平台取交集，没交集就不覆盖。
+        const platSel = card.querySelector(".wa-plat");
+        const pf = src.platforms && platSel ? src.platforms[parseInt(platSel.value, 10) || 0] : null;
+        if (!models.length) {
+          msg.textContent = "上游没返回模型：确认服务已启动、地址可达";
+        } else if (pf && pf.id !== "all") {
+          const want = new Set(pf.models.map((m) => m.toLowerCase()));
+          const hit = models.filter((m) => want.has(String(m).toLowerCase()));
+          if (hit.length) {
+            modelsEl.value = hit.join(", ");
+            msg.textContent = `上游返回 ${models.length} 个模型，其中属于「${pf.label}」的 ${hit.length} 个已填入`;
+          } else {
+            msg.textContent = `上游现在没有「${pf.label}」的模型（返回的 ${models.length} 个是 ${models.slice(0, 2).join("、")} 等）。`
+              + `多半是还没登录该平台账号——在上面 ① 里把平台选成「${pf.label}」再导入一个账号。已保留你原来的模型清单。`;
+          }
+        } else {
+          modelsEl.value = models.join(", ");
           msg.textContent = `已拉取 ${models.length} 个模型（已填入上方，可自行删减）`;
         }
       } catch (err) {
