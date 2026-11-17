@@ -468,7 +468,6 @@ const PLATFORM_LOGIN = {
   deepseek: { label: "DeepSeek", url: "https://chat.deepseek.com", tip: "登录后随便发一句话" },
   chatglm: { label: "智谱 GLM", url: "https://chatglm.cn", tip: "登录后进入对话页" },
   kimi: { label: "Kimi", url: "https://www.kimi.com", tip: "登录后在对话框发一句话" },
-  qwen: { label: "通义千问", url: "https://chat.qwen.ai", tip: "登录后随便发一句话" },
 };
 
 const NO_CREDITS = new Set(["customopenai"]);
@@ -2228,27 +2227,6 @@ async function removeCustomChannel(name) {
 // 用户不用理解它们的技术差异，只要选一个、按教程跑起来、点「填入」即可。
 const WEBAPI_SOURCES = [
   {
-    id: "gemini",
-    name: "gemini-web2api",
-    tagline: "Google Gemini 网页版，单文件、**零登录**、支持工具调用",
-    needLogin: false,
-    recommend: true,
-    where: "飞牛或任意装 Python 的机器（一条命令）",
-    base: "http://127.0.0.1:8081/v1",
-    keyHint: "看它目录里 config.json 的 api_keys（没配时随便填）",
-    login: "不用登录（但要出墙代理；被 429 时可加 cookie）",
-    models: ["gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash-thinking", "gemini-3.1-pro", "gemini-auto"],
-    alt: "跑在别的机器上时，把 127.0.0.1 换成那台机器的局域网 IP",
-    repo: "https://github.com/Sophomoresty/gemini-web2api",
-    steps: [
-      "在飞牛上装好 Python（应用中心）后执行：pip install httpx",
-      "下载仓库里的 gemini_web2api.py（单文件），放到任意目录",
-      "运行：python gemini_web2api.py（默认监听 8081）",
-      "填 api_key：看它 config.json 的 api_keys（没配时随便填）",
-      "⚠️ 若返回 429 Too Many Requests：说明出口 IP 被 Google 限流（机场节点被共用常见）。两个解法：① 换个干净节点；② 带登录态——浏览器登录 gemini.google.com 后导出 cookie 存成 /vol1/@appdata/gemini-web2api/cookie.txt 再重启该应用（带 SAPISID 后按账号配额算，不再吃匿名限流）",
-    ],
-  },
-  {
     id: "duruoxian",
     name: "duruoxian webai2api",
     tagline: "DeepSeek / 智谱 / Kimi / 通义 四平台，自带多账号池与自动换号",
@@ -2264,12 +2242,14 @@ const WEBAPI_SOURCES = [
     // 四个平台各自一套模型。电脑端点选平台即可，不必知道模型名——
     // 这里照搬同样的体验：选平台 → 自动填模型；想知道上游真实清单再点「拉取模型」。
     platforms: [
-      { id: "all", label: "全部平台（DeepSeek + 智谱 + Kimi + 通义）", site: "",
-        models: ["deepseek-chat", "deepseek-reasoner", "GLM-5.3", "kimi-k3", "qwen3.7-plus"] },
+      // 通义已移除：duruoxian 的 qwen 适配器依赖 WebView2（Windows 组件）做浏览器中继，
+      // 在飞牛（Linux）上永远起不来，调用只会 45s 超时；新版 qianwen.com 又加了 baxia
+      // 请求签名（clt-acs-sign 每次不同），无法自建反代。
+      { id: "all", label: "全部平台（DeepSeek + 智谱 + Kimi）", site: "",
+        models: ["deepseek-chat", "deepseek-reasoner", "GLM-5.3", "GLM-5.3-Flash", "kimi-k2.8", "kimi-k2.6"] },
       { id: "deepseek", label: "DeepSeek（对话 / 推理）", site: "https://chat.deepseek.com", models: ["deepseek-chat", "deepseek-reasoner"] },
-      { id: "glm", label: "智谱 GLM", site: "https://chatglm.cn", models: ["GLM-5.3"] },
-      { id: "kimi", label: "月之暗面 Kimi", site: "https://www.kimi.com", models: ["kimi-k3"] },
-      { id: "qwen", label: "通义千问", site: "https://chat.qwen.ai", models: ["qwen3.7-plus"] },
+      { id: "glm", label: "智谱 GLM", site: "https://chatglm.cn", models: ["GLM-5.3", "GLM-5.3-Flash"] },
+      { id: "kimi", label: "月之暗面 Kimi", site: "https://www.kimi.com", models: ["kimi-k2.8", "kimi-k2.6"] },
     ],
     alt: "跑在电脑上时把 127.0.0.1 换成电脑局域网 IP（如 192.168.1.50:8800）",
     repo: "https://github.com/duruoxian/webai2api",
@@ -2398,7 +2378,6 @@ function renderWebAPICards() {
               <option value="deepseek">DeepSeek</option>
               <option value="chatglm">智谱 GLM</option>
               <option value="kimi">月之暗面 Kimi</option>
-              <option value="qwen">通义千问</option>
             </select>
           </div>
           <div class="hint wa-login-hint" style="margin-top:4px">${provHintHTML("deepseek")}</div>

@@ -610,11 +610,11 @@
         <summary>完整教程：从零接入一个 WebAPI 源</summary>
         <ol class="wa-steps">
           <li><b>选一个源并在飞牛/电脑上跑起来</b>：能装 FPK 的优先（duruoxian、Loomy 都有现成包），
-              零依赖的 gemini-web2api 直接 <code>pip install httpx &amp;&amp; python gemini_web2api.py</code>。</li>
+              零依赖的单文件反代（如 xinghuo-2api）直接 <code>python main.py</code> 起，改 <code>.env</code> 填凭证。</li>
           <li><b>确认它在监听</b>：<code>curl http://127.0.0.1:端口/v1/models</code>，返回 <code>{"data":[...]}</code> 即正常；
               返回 401 也正常（说明要 key）。</li>
           <li><b>拿到它的 API Key</b>：duruoxian 在管理面板「API Key」页生成 <code>sk-...</code>；
-              gemini-web2api 零鉴权，随便填（如 <code>sk-any</code>）；Loomy 按其文档。</li>
+              单文件反代填它 <code>.env</code> 里的 <code>API_MASTER_KEY</code>；Loomy 按其文档。</li>
           <li><b>登录平台账号</b>：duruoxian 在面板「浏览器登录」扫码；Loomy 必须先在<b>有屏幕的电脑</b>上扫码，
               再把 <code>loomy-profile/</code> 整份拷进飞牛；gemini 不需要登录。</li>
           <li><b>填进网关</b>：点卡片的「接入这个源」→ 只填 api_key（模型和并发已预填）→「添加为 webAPI 账号」；保存后<b>重启网关</b>生效。</li>
