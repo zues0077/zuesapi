@@ -2998,6 +2998,22 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 	// 必须由后端代发：① 浏览器直连几乎必被 CORS 挡死；② api_key 不必在前端跨域
 	// 请求里裸奔。安全面与 ChatStream 一致——这个 base_url 本来就是用户自己填、
 	// 网关随后也会去请求的地址，不引入新的出站能力。
+	// WebAPI 账号导入：把「手动凭证」直接写进本机 webai2api 服务，省掉进它自己面板的一步。
+	// 只允许私有地址（见 webapi_proxy.go 的 isPrivateBaseURL），避免变成任意 URL 代理。
+	mux.HandleFunc("POST /api/webapi/import_account", func(w http.ResponseWriter, r *http.Request) {
+		var req webapiImportReq
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			apiError(w, http.StatusBadRequest, "请求体解析失败: "+err.Error())
+			return
+		}
+		out, ierr := importWebAPAccount(r.Context(), req)
+		if ierr != nil {
+			apiError(w, http.StatusBadGateway, ierr.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "account": out["account"]})
+	})
+
 	mux.HandleFunc("POST /api/config/custom_channels/probe", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			BaseURL string `json:"base_url"`

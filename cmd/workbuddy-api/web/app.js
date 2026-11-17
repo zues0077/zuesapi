@@ -2232,6 +2232,7 @@ const WEBAPI_SOURCES = [
     keyHint: "面板「API Key」页生成 sk-...",
     login: "要登录（飞牛上没有内置浏览器，改用手动粘凭证）",
     bookmarklet: true,
+    importCred: true,
     models: ["deepseek-chat", "deepseek-reasoner", "GLM-5.3", "kimi-k3", "qwen3.7-plus"],
     // 四个平台各自一套模型。电脑端点选平台即可，不必知道模型名——
     // 这里照搬同样的体验：选平台 → 自动填模型；想知道上游真实清单再点「拉取模型」。
@@ -2340,6 +2341,56 @@ function renderWebAPICards() {
         <button type="button" class="btn small primary wa-open">接入这个源</button>
       </div>
       <div class="wa-form hidden">
+        ${s.importCred ? `<details class="wa-adv" style="margin-top:8px">
+          <summary class="hint">① 还没登录平台账号？直接在这里导入（不必进它自己的面板）</summary>
+          <div class="row" style="margin-top:6px">
+            <label class="lbl wide">粘贴凭证</label>
+            <div class="grow">
+              <div class="row">
+                <input class="input grow" data-f="credjson" placeholder="用上面的书签复制出的 JSON 整段粘进来，点右侧即可自动拆成四项" spellcheck="false">
+                <button type="button" class="btn tiny wa-split" style="margin-left:6px">拆开填入</button>
+              </div>
+            </div>
+          </div>
+          <div class="row" style="margin-top:6px">
+            <label class="lbl wide">平台</label>
+            <select class="input grow wa-prov">
+              <option value="deepseek">DeepSeek</option>
+              <option value="chatglm">智谱 GLM</option>
+              <option value="kimi">月之暗面 Kimi</option>
+              <option value="qwen">通义千问</option>
+            </select>
+          </div>
+          <div class="row" style="margin-top:6px">
+            <label class="lbl wide">账号名</label>
+            <input class="input grow" data-f="accname" value="我的dsh" spellcheck="false">
+          </div>
+          <div class="row" style="margin-top:6px">
+            <label class="lbl wide">auth_token</label>
+            <input class="input grow" data-f="at" spellcheck="false">
+          </div>
+          <div class="row" style="margin-top:6px">
+            <label class="lbl wide">device_id</label>
+            <input class="input grow" data-f="did" spellcheck="false">
+          </div>
+          <div class="row" style="margin-top:6px">
+            <label class="lbl wide">settings_token</label>
+            <input class="input grow" data-f="st" spellcheck="false">
+          </div>
+          <div class="row" style="margin-top:6px">
+            <label class="lbl wide">cookie</label>
+            <textarea class="input grow" data-f="ck" rows="2" spellcheck="false"></textarea>
+          </div>
+          <div class="row" style="margin-top:6px">
+            <label class="lbl wide">面板密码</label>
+            <input class="input" data-f="apwd" value="admin" style="width:150px" type="password" autocomplete="new-password">
+            <span class="hint" style="margin-left:8px">目标服务的默认密码是 admin，改过就填新的</span>
+          </div>
+          <div class="row" style="margin-top:8px">
+            <button type="button" class="btn small wa-import">导入到 webAPI 服务</button>
+            <span class="hint wa-import-msg" style="margin-left:8px"></span>
+          </div>
+        </details>` : ""}
         <div class="row" style="margin-top:10px">
           <label class="lbl wide">api_key</label>
           <input class="input grow" data-f="key" placeholder="${esc(s.keyHint)}" spellcheck="false">
@@ -2421,6 +2472,45 @@ function bindWebAPIEvents() {
       const code = decodeURIComponent(buildCredBookmarklet().replace(/^javascript:/, ""));
       try { await navigator.clipboard.writeText(code); alert("已复制脚本。\n\n到 chat.deepseek.com 按 F12 → Console 粘贴回车即可。"); }
       catch (_) { prompt("复制失败，请手动复制：", code); }
+      return;
+    }
+    // 把书签复制出来的整段 JSON 拆成四个输入框（用户不必自己找哪个值放哪）
+    if (e.target.closest(".wa-split")) {
+      const raw = (card.querySelector('[data-f="credjson"]').value || "").trim();
+      let doc;
+      try { doc = JSON.parse(raw); } catch (_) { alert("粘贴的内容不是合法 JSON"); return; }
+      const pick = (...keys) => keys.map((k) => doc && doc[k]).find((v) => typeof v === "string" && v) || "";
+      card.querySelector('[data-f="at"]').value = pick("auth_token", "t", "token", "accessToken");
+      card.querySelector('[data-f="did"]').value = pick("device_id", "d", "deviceId");
+      card.querySelector('[data-f="st"]').value = pick("settings_token", "s", "settingsJwt");
+      card.querySelector('[data-f="ck"]').value = pick("cookie", "c");
+      return;
+    }
+    // 直接把账号写进本机 webai2api 服务（网关代劳，省掉进它面板的一步）
+    if (e.target.closest(".wa-import")) {
+      const src3 = WEBAPI_SOURCES.find((x) => x.id === card.dataset.src);
+      const msg = card.querySelector(".wa-import-msg");
+      const btn = e.target.closest(".wa-import");
+      const val = (f) => (card.querySelector('[data-f="' + f + '"]') || {}).value || "";
+      btn.disabled = true;
+      msg.textContent = "正在导入…";
+      try {
+        const r = await api("/api/webapi/import_account", {
+          base_url: src3.base.replace(/\/v1$/, ""),
+          admin_password: val("apwd"),
+          provider: (card.querySelector(".wa-prov") || {}).value || "deepseek",
+          name: val("accname"),
+          auth_token: val("at"),
+          device_id: val("did"),
+          settings_token: val("st"),
+          cookie: val("ck"),
+        });
+        const nm = (r && r.account && r.account.name) || "账号";
+        msg.textContent = "✅ 已导入「" + nm + "」，可以继续填下面的 api_key";
+      } catch (err) {
+        msg.textContent = "❌ " + (err.message || err);
+      }
+      btn.disabled = false;
       return;
     }
     if (e.target.closest(".wa-probe")) {
