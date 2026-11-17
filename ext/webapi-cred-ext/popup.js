@@ -64,6 +64,23 @@ const SITES = [
     },
   },
   {
+    // 讯飞星火的**主站**（xinghuo.xfyun.cn）与 Loomy（loomy.xunfei.cn）是两个站点：
+    // 网关的 loomy 渠道对接的是 loomyad.xunfei.cn，session 也只在 loomy 域名下。
+    // 用户实测就在主站上点扩展，看到"未识别"一头雾水 —— 这里明确指路。
+    id: "xinghuo-main",
+    name: "讯飞星火主站（不是 Loomy）",
+    hosts: ["xinghuo.xfyun.cn", "xfyun.cn"],
+    build: () => ({
+      level: "err",
+      text: "",
+      raw: "",
+      usage: `这里是<b>讯飞星火主站</b>，网关对接的 Loomy 是另一个站点。
+        <br>请打开 <a href="https://loomy.xunfei.cn" target="_blank">loomy.xunfei.cn</a>
+        （标题是「Loomy · 让工作更轻松」）并在那里登录，再点本扩展的「提取」。
+        <br>两个站的登录态不通用，主站的 Cookie 不能给 Loomy 用。`,
+    }),
+  },
+  {
     id: "loomy",
     name: "讯飞星火 Loomy",
     hosts: ["loomy.xunfei.cn", "loomyad.xunfei.cn"],

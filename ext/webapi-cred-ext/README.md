@@ -46,6 +46,13 @@
 - **Gemini 缺 Cookie 会给 warn**：明确列出缺哪几个（`__Secure-1PSID` /
   `__Secure-1PSIDTS` / `SAPISID`），避免拿着半截 Cookie 去怀疑别处。
 
+## 常见误点：讯飞星火主站 ≠ Loomy
+
+- `xinghuo.xfyun.cn`（讯飞星火主站）和 `loomy.xunfei.cn`（Loomy）是**两个站点**，
+  网关的 loomy 渠道对接 `loomyad.xunfei.cn`，登录态只在 loomy 域名下有效。
+- 在主站上点扩展会提示「这里是讯飞星火主站，请打开 loomy.xunfei.cn」——这是刻意设计的指路，
+  不是识别失败。两个站的 Cookie 不通用。
+
 ## 已知限制
 
 - 只支持 Manifest V3 的 Chromium 系浏览器；Firefox 需要改 `background`/权限写法。

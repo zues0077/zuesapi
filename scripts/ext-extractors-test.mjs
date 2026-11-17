@@ -118,6 +118,11 @@ const match = (u) => SITES.find((s) => s.hosts.some((h) => {
 check("匹配 chat.deepseek.com", match("https://chat.deepseek.com/a/chat")?.id === "deepseek");
 check("匹配 loomyad.xunfei.cn", match("https://loomyad.xunfei.cn/x")?.id === "loomy");
 check("不匹配无关站点", !match("https://www.baidu.com/"));
+// 星火主站要落到"去错站点"的提示规则，而不是落到 loomy 或未识别
+check("讯飞星火主站 -> xinghuo-main", match("https://xinghuo.xfyun.cn/desk")?.id === "xinghuo-main");
+check("Loomy 子域仍归 loomy", match("https://loomy.xunfei.cn/chat")?.id === "loomy");
+const xh = byId("xinghuo-main").build({ ls: {}, cookies: [], rawDump: () => "{}" });
+check("星火主站提示里给出 loomy.xunfei.cn", xh.level === "err" && xh.usage.includes("loomy.xunfei.cn"));
 
 console.log(fail === 0 ? "\n全部通过" : `\n${fail} 项失败`);
 process.exit(fail === 0 ? 0 : 1);
