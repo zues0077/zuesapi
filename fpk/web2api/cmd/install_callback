@@ -5,6 +5,8 @@
 ### 因此这里只需要保证目录存在且属主正确。
 
 mkdir -p "${TRIM_PKGVAR}/data"
+# 程序把数据写在「包目录旁的 data/」，软链到持久化目录（升级不丢账号/密钥）
+ln -sfn "${TRIM_PKGVAR}/data" "${TRIM_APPDEST}/pysite/data" 2>/dev/null
 chmod 700 "${TRIM_PKGVAR}" 2>/dev/null
 
 exit 0

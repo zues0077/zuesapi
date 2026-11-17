@@ -11,7 +11,7 @@
 PORT="${port:-8800}"
 HOST="${host:-127.0.0.1}"
 DATA="${TRIM_PKGVAR}"
-BIN="${TRIM_APPDEST}/bin/webai2api"
+PYSITE="${TRIM_APPDEST}/pysite"
 LOG="${DATA}/info.log"
 PIDF="${DATA}/app.pid"
 
@@ -45,10 +45,20 @@ start_process() {
         rm -f "${PIDF}"
     fi
 
-    log_msg "启动：${BIN} --host ${HOST} --port ${PORT}（工作目录 ${DATA}）"
-    # cd 到数据目录：程序把 SQLite 与浏览器档案写成 ./data/，换目录等于换账号池。
+    # 解释器：优先用飞牛应用中心装的 Python 3.12（本包不带运行时，省 100MB+）。
+    PY="$(ls /vol2/@appcenter/python312/bin/python3.12 2>/dev/null | head -1)"
+    [ -z "${PY}" ] && PY="$(ls /vol1/@appcenter/python312/bin/python3.12 2>/dev/null | head -1)"
+    [ -z "${PY}" ] && PY="$(command -v python3.12 2>/dev/null)"
+    if [ -z "${PY}" ]; then
+        log_msg "找不到 python3.12：请先在应用中心安装「Python 3.12」再启动本应用"
+        return 1
+    fi
+    # 程序把数据写到「包目录旁的 data/」，这里软链到数据库目录，升级时不会丢登录态。
+    mkdir -p "${DATA}/data"
+    ln -sfn "${DATA}/data" "${PYSITE}/data"
+    log_msg "启动：${PY} -m webai2api（PYTHONPATH=${PYSITE}，数据 ${DATA}/data）"
     cd "${DATA}" || { log_msg "进入 ${DATA} 失败"; return 1; }
-    nohup "${BIN}" --host "${HOST}" --port "${PORT}" >> "${LOG}" 2>&1 &
+    PYTHONPATH="${PYSITE}" nohup "${PY}" -m webai2api --host "${HOST}" --port "${PORT}" >> "${LOG}" 2>&1 &
     pid=$!
     echo "${pid}" > "${PIDF}"
 
