@@ -2340,14 +2340,14 @@ function renderWebAPICards() {
         <button type="button" class="btn small primary wa-open">接入这个源</button>
       </div>
       <div class="wa-form hidden">
-        ${s.importCred ? `<details class="wa-adv" style="margin-top:8px">
-          <summary class="hint">① 还没登录平台账号？直接在这里导入（不必进它自己的面板）</summary>
+        ${s.importCred ? `<details class="wa-adv" style="margin-top:8px" open>
+          <summary class="hint"><b>① 导入平台账号</b>（还没登录过才需要；已登录可跳过直接填下面的 api_key）</summary>
           <div class="row" style="margin-top:6px">
             <label class="lbl wide">粘贴凭证</label>
             <div class="grow">
               <div class="row">
                 <input class="input grow" data-f="credjson" placeholder="用上面的书签复制出的 JSON 整段粘进来，点右侧即可自动拆成四项" spellcheck="false">
-                <button type="button" class="btn tiny wa-split" style="margin-left:6px">拆开填入</button>
+                <button type="button" class="btn tiny primary wa-split" style="margin-left:6px">拆开填入 ↓</button>
               </div>
             </div>
           </div>
@@ -2390,6 +2390,7 @@ function renderWebAPICards() {
             <span class="hint wa-import-msg" style="margin-left:8px"></span>
           </div>
         </details>` : ""}
+        ${!s.importCred ? `<div class="hint" style="margin-top:8px">这个源${s.needLogin ? "需要单独登录（见上面的步骤）" : "零登录"}，<b>不需要导入凭证</b>，直接填下面的 api_key 即可。</div>` : ""}
         <div class="row" style="margin-top:10px">
           <label class="lbl wide">api_key</label>
           <div class="grow">
