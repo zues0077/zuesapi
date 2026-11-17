@@ -2396,6 +2396,10 @@ function renderWebAPICards() {
           <div class="row" style="margin-top:8px">
             <button type="button" class="btn small wa-import">导入到 webAPI 服务</button>
             <span class="hint wa-import-msg" style="margin-left:8px"></span>
+            <div class="hint" style="margin-top:4px;flex-basis:100%">
+              点它 = 让网关替你去那个服务里建账号（等价于它面板里的「手动填写凭证」）。
+              <b>已经登录过就不必点</b>，直接跳到下面的 api_key。
+            </div>
           </div>
         </details>` : ""}
         ${!s.importCred ? `<div class="hint" style="margin-top:8px">这个源${s.needLogin ? "需要单独登录（见上面的步骤）" : "零登录"}，<b>不需要导入凭证</b>，直接填下面的 api_key 即可。</div>` : ""}
