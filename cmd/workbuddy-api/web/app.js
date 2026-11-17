@@ -2045,6 +2045,7 @@ function validateProxies() {
 // 为什么不做成"自动登录/自动拿 key"：这些平台都没有免交互的公开授权流，
 // 硬做等于把用户凭据托管给我们，收益不抵风险（也不符合本工具"本地自用"的定位）。
 const CUSTOM_PRESETS = [
+  { label: "✎ 自定义（手填 base_url）", base: "", hint: "任何 OpenAI 兼容服务：填它的 base_url（一般以 /v1 结尾）和 key" },
   { label: "DeepSeek 官方", base: "https://api.deepseek.com/v1", hint: "key 在 platform.deepseek.com → API keys" },
   { label: "月之暗面 Kimi", base: "https://api.moonshot.cn/v1", hint: "key 在 platform.moonshot.cn → API Key 管理" },
   { label: "智谱 GLM（开放平台）", base: "https://open.bigmodel.cn/api/paas/v4", hint: "key 在 bigmodel.cn → API Keys" },
@@ -2192,40 +2193,63 @@ async function removeCustomChannel(name) {
 // 用户不用理解它们的技术差异，只要选一个、按教程跑起来、点「填入」即可。
 const WEBAPI_SOURCES = [
   {
+    id: "gemini",
+    name: "gemini-web2api",
+    tagline: "Google Gemini 网页版，单文件、**零登录**、支持工具调用",
+    needLogin: false,
+    recommend: true,
+    where: "飞牛或任意装 Python 的机器（一条命令）",
+    base: "http://127.0.0.1:8081/v1",
+    keyHint: "零鉴权：key 随便填，如 sk-any",
+    login: "不用登录",
+    models: ["gemini-3.5-flash", "gemini-3.5-flash-thinking", "gemini-3.5-pro"],
+    alt: "跑在别的机器上时，把 127.0.0.1 换成那台机器的局域网 IP",
+    repo: "https://github.com/Sophomoresty/gemini-web2api",
+    steps: [
+      "在飞牛上装好 Python（应用中心）后执行：pip install httpx",
+      "下载仓库里的 gemini_web2api.py（单文件），放到任意目录",
+      "运行：python gemini_web2api.py（默认监听 8081）",
+      "不用登录、不用 Cookie，直接填下面的 api_key（随便填 sk-any）",
+    ],
+  },
+  {
     id: "duruoxian",
     name: "duruoxian webai2api",
     tagline: "DeepSeek / 智谱 / Kimi / 通义 四平台，自带多账号池与自动换号",
-    where: "飞牛 FPK（web2api.fpk）或电脑上跑 exe",
+    needLogin: true,
+    where: "飞牛 FPK（web2api.fpk，已装）或电脑上跑 exe",
     base: "http://127.0.0.1:8800/v1",
     keyHint: "面板「API Key」页生成 sk-...",
-    login: "面板「浏览器登录」扫码（电脑或 SSH 隧道打开管理页）",
+    login: "要登录（飞牛上没有内置浏览器，改用手动粘凭证）",
     models: ["deepseek-chat", "deepseek-reasoner", "GLM-5.3", "kimi-k3", "qwen3.7-plus"],
     alt: "跑在电脑上时把 127.0.0.1 换成电脑局域网 IP（如 192.168.1.50:8800）",
     repo: "https://github.com/duruoxian/webai2api",
-  },
-  {
-    id: "gemini",
-    name: "gemini-web2api",
-    tagline: "Google Gemini 网页版，零鉴权、单文件、支持工具调用",
-    where: "任意装 Python 的机器：pip install httpx && python gemini_web2api.py",
-    base: "http://127.0.0.1:8081/v1",
-    keyHint: "零鉴权，key 随便填（如 sk-any）",
-    login: "无需登录",
-    models: ["gemini-3.5-flash", "gemini-3.5-flash-thinking", "gemini-3.5-pro"],
-    alt: "默认端口 8081；跨机器访问同样要换局域网 IP",
-    repo: "https://github.com/Sophomoresty/gemini-web2api",
+    steps: [
+      "确认飞牛上的 web2api 应用在跑（应用中心 → webai2api → 启动）",
+      "在电脑浏览器登录 deepseek 网页版 → F12 → Console 粘贴仓库 README 里那段 copy(...) 脚本，一次性拿到 4 个字段",
+      "打开 web2api 管理面板（面板只允许本机访问，需要先开 SSH 隧道：ssh -L 18800:127.0.0.1:8800 admin@飞牛IP，再开 http://127.0.0.1:18800/admin，密码 admin）",
+      "面板 →「账号管理」→ 添加账号（只填名称）→ 用「手动粘贴凭证」填入 4 个字段",
+      "面板 →「API Key」→ 生成 sk-...，把 key 填到下面",
+    ],
   },
   {
     id: "loomy",
     name: "Loomy Proxy",
-    tagline: "讯飞星火 Loomy 网页版，FlareSolverr/Playwright 取 Cookie",
-    where: "FnDepot 上有现成 fnOS FPK（端口 19999）",
+    tagline: "讯飞星火 Loomy 网页版（FnDepot 有现成 FPK）",
+    needLogin: true,
+    where: "FnDepot 的 fnOS FPK（端口 19999）",
     base: "http://127.0.0.1:19999/v1",
     keyHint: "按其面板/文档生成的 key",
-    login: "必须先在电脑上扫码，把 loomy-profile 拷进飞牛",
+    login: "要登录（必须先在电脑上扫码，再拷 profile）",
     models: ["loomy"],
     alt: "登录态过期就要重拷一次 profile",
     repo: "https://github.com/narrator-z/FnDepot/tree/main/loomyproxy",
+    steps: [
+      "从 FnDepot 装 Loomy Proxy 的 fpk",
+      "在**有屏幕的电脑**上跑它给的 login.js，扫码登录 Loomy",
+      "把生成的 loomy-profile/ 目录整份拷到飞牛的应用数据目录",
+      "重启该应用，再填下面的 key",
+    ],
   },
 ];
 
@@ -2237,6 +2261,8 @@ function renderWebAPICards() {
       <div class="wa-head">
         <b>${esc(s.name)}</b>
         <span class="badge webapi">webAPI</span>
+        <span class="badge ${s.needLogin ? "needlogin" : "nologin"}">${s.needLogin ? "需登录" : "零登录"}</span>
+        ${s.recommend ? '<span class="badge rec">推荐先用</span>' : ""}
       </div>
       <div class="hint" style="margin:2px 0 6px">${esc(s.tagline)}</div>
       <div class="wa-kv"><span>跑在哪</span><div>${esc(s.where)}</div></div>
@@ -2244,6 +2270,9 @@ function renderWebAPICards() {
       <div class="wa-kv"><span>API Key</span><div>${esc(s.keyHint)}</div></div>
       <div class="wa-kv"><span>怎么登录</span><div>${esc(s.login)}</div></div>
       <div class="wa-kv"><span>项目地址</span><div><a href="${esc(s.repo)}" target="_blank" rel="noreferrer">${esc(s.repo)}</a></div></div>
+      <div class="wa-kv"><span>怎么做</span><div>
+        <ol class="wa-steps">${(s.steps || []).map((t) => `<li>${esc(t)}</li>`).join("")}</ol>
+      </div></div>
       <div class="row" style="margin-top:8px">
         <button type="button" class="btn small primary wa-open">接入这个源</button>
       </div>

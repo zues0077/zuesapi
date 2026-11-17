@@ -1087,3 +1087,10 @@ code.about-repo:active { transform: translateY(1px); }
 .wa-kv > span { color: var(--muted); }
 .wa-kv a { color: var(--primary); word-break: break-all; }
 .wa-steps { margin: 6px 0 0; padding-left: 20px; font-size: 12.5px; line-height: 1.9; }
+
+/* WebAPI 卡片的登录态徽标：让用户一眼看出哪个源不用登录 */
+.badge.nologin { background: #059669; }
+.badge.needlogin { background: #b45309; }
+.badge.rec { background: #2563eb; }
+.wa-steps { margin: 2px 0 0; padding-left: 18px; font-size: 12px; line-height: 1.75; }
+.wa-steps li { margin-bottom: 2px; }

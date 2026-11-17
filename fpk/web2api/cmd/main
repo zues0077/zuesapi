@@ -9,7 +9,10 @@
 ### 安装目录用 TRIM_APPDEST；向导变量 port/host 从环境注入。
 
 PORT="${port:-8800}"
-HOST="${host:-127.0.0.1}"
+# 默认监听 0.0.0.0：飞牛没有图形界面，duruoxian 的「内置浏览器登录」用不了，
+# 用户只能从同网段设备打开管理面板手动粘凭证 —— 绑环回就等于把面板锁死。
+# 面板自身有密码（默认 admin，务必改），API 侧仍强制 Bearer key。
+HOST="${host:-0.0.0.0}"
 DATA="${TRIM_PKGVAR}"
 PYSITE="${TRIM_APPDEST}/pysite"
 LOG="${DATA}/info.log"
