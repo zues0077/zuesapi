@@ -578,6 +578,56 @@ func (h *Handler) fetchRuntimeModels(rt *Runtime) []provider.ModelInfo {
 	return rt.fetchModels(false)
 }
 
+// fetchModelsAllInstances 取自定义渠道所有实例的模型并集（按 ID 去重）。
+// 与单账号渠道的区别：一个 customopenai 渠道里可能挂着多个不同服务，
+// 它们各自的模型清单互不重叠，必须合并才完整。
+func (rt *Runtime) fetchModelsAllInstances() []provider.ModelInfo {
+	accts := rt.Pool.List()
+	if len(accts) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(accts)*8)
+	out := make([]provider.ModelInfo, 0, len(accts)*8)
+	var firstErr error
+	for _, st := range accts {
+		// List() 给的是视图，取回 Auth 指针才能交给上游
+		au := rt.Pool.AuthByUID(st.UID)
+		if au == nil {
+			continue
+		}
+		infos, err := rt.Upstream.FetchModels(au)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		for _, mi := range infos {
+			if mi.ID == "" || seen[mi.ID] {
+				continue
+			}
+			seen[mi.ID] = true
+			out = append(out, mi)
+		}
+	}
+	if len(out) == 0 {
+		if firstErr != nil {
+			log.Printf("models fetch failed platform=%s（全实例均失败）err=%v", rt.Kind, firstErr)
+		}
+		return nil
+	}
+	now := time.Now()
+	rt.mu.Lock()
+	rt.models = out
+	rt.fetched = now
+	rt.lastFail = time.Time{}
+	rt.mu.Unlock()
+	rt.setHealthLocked(provider.ChannelHealth{
+		Source: "live", UpdatedAt: now.Format(time.RFC3339), ModelCount: len(out), Stale: false,
+	})
+	return out
+}
+
 // fetchModels 模型列表拉取逻辑：
 //   - force(`true`) 显式触发，无视模型/费率的双冷却窗口；`false` 走正常 TTL + 失败负缓存。
 //   - 返回 nil 表示本渠道的模型列表不可用（无有效账号/接口故障/静止流表）。
@@ -608,6 +658,15 @@ func (rt *Runtime) fetchModels(force bool) []provider.ModelInfo {
 		return nil
 	}
 	rt.mu.RUnlock()
+	// 自定义渠道是「多实例聚合」：每个实例（deepseek / 智谱清言 / gemini …）各有自己的模型清单。
+	// 下面通用的 Pick 一个账号只取该实例的模型，会把其它实例整批藏掉——
+	// 实测：加了 gemini 渠道、路由也通，但 /v1/models 里一个 gemini 模型都没有。
+	// 所以这个渠道要走「遍历全部实例取并集」的路径。
+	if rt.Kind == provider.CustomOpenAI {
+		if infos := rt.fetchModelsAllInstances(); len(infos) > 0 {
+			return infos
+		}
+	}
 	acct := rt.Pool.Pick()
 	if acct == nil {
 		return nil
