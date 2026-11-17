@@ -51,7 +51,7 @@ func isPrivateBaseURL(raw string) (string, error) {
 	}
 	host := u.Hostname()
 	if host == "localhost" {
-		return strings.TrimRight(u.String(), "/"), nil
+		return normalizeAdminBase(u.String()), nil
 	}
 	ip := net.ParseIP(host)
 	if ip == nil {
@@ -60,7 +60,19 @@ func isPrivateBaseURL(raw string) (string, error) {
 	if !(ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast()) {
 		return "", fmt.Errorf("只允许本机或局域网地址")
 	}
-	return strings.TrimRight(u.String(), "/"), nil
+	return normalizeAdminBase(u.String()), nil
+}
+
+// normalizeAdminBase 把 OpenAI 兼容服务的 base_url 规范成「管理端根地址」。
+//
+// 这些服务对外都挂 /v1（http://127.0.0.1:8800/v1），但管理接口在根上
+// （/admin/api/login）。之前只去掉结尾的 `/`，于是请求 /v1/admin/api/login → 404
+// → 面板显示「登录目标服务失败（HTTP 404）」，用户完全不知道该怎么办。
+func normalizeAdminBase(raw string) string {
+	s := strings.TrimRight(strings.TrimSpace(raw), "/")
+	s = strings.TrimSuffix(s, "/v1")
+	s = strings.TrimSuffix(s, "/api")
+	return strings.TrimRight(s, "/")
 }
 
 // webapiPostJSON 向目标服务发一次 JSON 请求，返回状态码与响应体。
