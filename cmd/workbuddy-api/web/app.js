@@ -1420,8 +1420,15 @@ function promptLogin(channel) {
   // 纯导入型渠道：文案与动作都不同（读本机客户端凭据，而不是打开浏览器登录）。
   if (isImportLocal(channel)) {
     $("lcTitle").textContent = "导入 " + name + " 账号";
-    $("lcMsg").textContent = `将读取本机已登录的${name}客户端凭据并保存到 workbuddy-api（不会修改客户端本身）。`
-      + `若提示未找到凭据，请先打开并登录${name}客户端后重试。${NO_CHECKIN_LOGIN_HINT[channel] || ""}`;
+    // Loomy 的凭据在 Windows 客户端目录（C://Users//Public//Loomy//...），
+    // 飞牛/Linux 上没有这个目录，导入必然失败 —— 直接告诉用户改走 JSON 登录。
+    const loomyHint = channel === "loomy"
+      ? `<br><br><b>⚠ 在飞牛（Linux）上这条路走不通</b>：它读的是 Windows 客户端文件。
+         请改用「⌨ JSON 登录」→ 渠道选 <b>Loomy</b> → 粘贴
+         <code>{"auth":{"accessToken":"&lt;session&gt;"},"account":{"uid":"xunfei"}}</code>。`
+      : "";
+    $("lcMsg").innerHTML = `将读取本机已登录的${name}客户端凭据并保存到 workbuddy-api（不会修改客户端本身）。`
+      + `若提示未找到凭据，请先打开并登录${name}客户端后重试。${NO_CHECKIN_LOGIN_HINT[channel] || ""}${loomyHint}`;
     $("btnLoginConfirm").textContent = "导入";
     $("loginConfirmOverlay").classList.remove("hidden");
     return;
