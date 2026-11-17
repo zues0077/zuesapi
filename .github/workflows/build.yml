@@ -86,7 +86,11 @@ jobs:
       # 只在单个矩阵项执行，避免 5 个平台重复跑。
       - name: Frontend static check
         if: matrix.name == 'linux-amd64'
-        run: node scripts/ui-static-check.mjs
+        run: |
+          node scripts/ui-static-check.mjs
+          # DOM id 存在性：删/改 HTML 元素后若忘同步 JS 绑定，$("x") 为 null 会让
+          # init() 抛错、此后所有按钮失效（「点不动」的典型成因），语法检查查不出。
+          node scripts/check-dom-ids.mjs
 
       # 文本文件末尾换行检查（**纯提示，不阻断构建**）。
       #

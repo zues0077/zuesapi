@@ -1488,12 +1488,62 @@ async function exportJSONAccount() {
   toast("已导出到输入框，可直接复制或在本机改渠道后重新添加");
 }
 
+// extractChannels 判断粘贴的是不是「自定义渠道」格式（生成器/导出产物），
+// 而不是某个平台的登录凭据。判据：顶层是数组或 {channels:[...]}，且每一项都有
+// 非空 base_url —— 凭据 JSON 不会有 base_url，所以不会误判。
+function extractChannels(text) {
+  let doc;
+  try { doc = JSON.parse(text); } catch { return null; }
+  const arr = Array.isArray(doc) ? doc : (doc && Array.isArray(doc.channels) ? doc.channels : null);
+  if (!arr || !arr.length) return null;
+  if (!arr.every((c) => c && typeof c === "object" && typeof c.base_url === "string" && c.base_url.trim())) return null;
+  return arr;
+}
+
+// normalizeChannel 把外部 JSON 规整成后端 config 的形状（沿用弹层里的默认值）。
+function normalizeChannel(c, i) {
+  const name = String(c.name || "").trim() || ("custom" + (i + 1));
+  const tag = c.tag === "webapi" || c.tag === "reverse" ? "webapi" : "custom";
+  const conc = parseInt(c.max_concurrency, 10);
+  return {
+    name,
+    base_url: String(c.base_url).trim().replace(/\/+$/, ""),
+    api_key: String(c.api_key || "").trim(),
+    models: (Array.isArray(c.models) ? c.models : []).map((m) => String(m).trim()).filter(Boolean),
+    rate: Number.isFinite(parseFloat(c.rate)) ? parseFloat(c.rate) : 0,
+    max_concurrency: Number.isFinite(conc) && conc > 0 ? Math.min(conc, 32) : 0,
+    tag,
+  };
+}
+
 async function submitJSONLogin() {
   const channel = $("jsonChannel").value;
   const text = $("jsonPayload").value.trim();
   const errBox = $("jsonLoginErr");
   errBox.textContent = "";
   if (!text) { errBox.textContent = "请先粘贴凭据 JSON"; return; }
+  // 生成器 / 导出文件里的自定义渠道（channels 格式）不是登录凭据，
+  // 直接写进 custom_channels，账号列表会按 tag 显示「自定义API」/「webAPI」。
+  const chans = extractChannels(text);
+  if (chans) {
+    const next = (state.custom_channels || []).slice();
+    const names = new Set(next.map((c) => c.name));
+    for (let i = 0; i < chans.length; i++) {
+      const ch = normalizeChannel(chans[i], i);
+      if (names.has(ch.name)) { errBox.textContent = `渠道名「${ch.name}」已存在，请改名后重试`; return; }
+      names.add(ch.name);
+      next.push(ch);
+    }
+    try {
+      await saveCustomChannels(next, `已添加 ${chans.length} 个自定义渠道，重启网关后生效`);
+    } catch (e) {
+      errBox.textContent = e.message || "添加失败";
+      return;
+    }
+    $("jsonLoginOverlay").classList.add("hidden");
+    return;
+  }
+
   let r;
   try {
     r = await api("/api/login/json", { channel, json: text });
@@ -2714,9 +2764,24 @@ function bind() {
   // 自定义渠道：入口在账号管理页（不是设置里）。添加/删除都在独立弹层里完成。
   $("btnAddCustomChannelEntry").onclick = openCustomChannelModal;
   // 配置生成器是独立静态页（同一份 go:embed 资源），新窗口打开便于对照填写。
-  $("btnOpenGenerator").onclick = () => window.open("/custom-channel-helper.html", "_blank");
+  // 配置生成器入口已并入自定义渠道弹层的教程区（避免与「快速填充」重复），
+  // 这里不再绑顶部按钮；页面本身仍可通过 /custom-channel-helper.html 打开。
   $("btnOpenWebAPI").onclick = openWebAPI;
   $("btnWebAPIClose").onclick = closeWebAPI;
+
+  // 弹层通用关闭：点遮罩空白处 / 按 Esc（内容长时按钮可能在下方，必须留退路）
+  ["customChannelOverlay", "webapiOverlay"].forEach((id) => {
+    const ov = $(id);
+    if (!ov) return;
+    ov.addEventListener("click", (e) => { if (e.target === ov) ov.classList.add("hidden"); });
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    ["customChannelOverlay", "webapiOverlay"].forEach((id) => {
+      const ov = $(id);
+      if (ov && !ov.classList.contains("hidden")) ov.classList.add("hidden");
+    });
+  });
   $("btnCustomChannelClose").onclick = closeCustomChannelModal;
   $("btnAddCustomConfirm").onclick = addCustomChannel;
   $("btnProbeModels").onclick = probeCustomModels;

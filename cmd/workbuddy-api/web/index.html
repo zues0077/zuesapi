@@ -74,8 +74,7 @@
           <!-- 第 3 行：用户自定义（不依赖官方登录，自己填 base_url + key） -->
           <button class="btn primary alt custom" id="btnAddCustomChannelEntry" style="grid-column:1;grid-row:3"
             title="添加一个自定义 OpenAI 兼容上游（填 base_url + api_key，可拉取模型列表）">＋ 增加自定义账号</button>
-          <button class="btn primary alt custom" id="btnOpenGenerator" style="grid-column:4;grid-row:4"
-            title="通用配置生成器：选平台自动填 base_url、给出去哪拿 key 的链接，生成后粘回来导入">🧩 配置生成器</button>
+          
           <button class="btn primary alt webapi" id="btnOpenWebAPI" style="grid-column:5;grid-row:4"
             title="网页版模型接入（WebAPI）：把 DeepSeek/Kimi/Gemini 等网页版变成免费 OpenAI 接口，含部署教程">🌐 WebAPI 接入</button>
           <button class="btn primary alt" id="btnAddJSON" style="grid-column:1;grid-row:4"
@@ -329,7 +328,7 @@
 <!-- JSON 登录弹层：粘贴凭据 JSON 直接添加账号（全渠道兜底） -->
 <div class="overlay hidden" id="jsonLoginOverlay">
   <div class="modal modal-wide">
-    <div class="modal-title">JSON 登录（粘贴凭据添加账号）</div>
+    <div class="modal-title">JSON 登录（粘贴凭据或渠道配置）</div>
     <div class="modal-body settings-body">
       <div class="row">
         <label class="lbl wide">渠道</label>
@@ -341,6 +340,10 @@
           placeholder='两种格式均可：&#10;① 嵌套（与 auths/*.json 一致）&#10;{"auth":{"accessToken":"…","refreshToken":"…","expiresAt":0,"domain":""},"account":{"uid":"…","nickname":"…"}}&#10;② 扁平&#10;{"accessToken":"…","refreshToken":"…","expiresIn":3600,"uid":"…"}&#10;&#10;说明：uid 缺失时会从 access_token(JWT) 自动推导；glm 渠道可只填 refreshToken。'></textarea>
       </div>
       <div class="hint">落盘格式与加密策略和浏览器登录完全一致，token 只保存在本机 <code>auths/</code>。</div>
+      <div class="hint" style="margin-top:6px;padding:6px 9px;border-left:2px solid var(--primary);background:var(--bg-soft,rgba(0,0,0,.03))">
+        也支持粘贴<b>自定义渠道配置</b>（形如 <code>{"channels":[{"name":"…","base_url":"…","api_key":"…","models":[…],"tag":"webapi"}]}</code>）：
+        会自动加入「自定义渠道」并按 <code>tag</code> 在账号卡片上标 <b>自定义API</b> / <b>webAPI</b>，无需再弹窗填表。
+      </div>
       <div class="cfg-section">
         <div class="cfg-heading">从现有账号导出（获取 JSON 的另一种方式）</div>
         <div class="row">
@@ -581,7 +584,7 @@
 
 <!-- WebAPI 接入：把网页版模型变成免费 OpenAI 接口（三类开源项目合一入口） -->
 <div class="overlay hidden" id="webapiOverlay">
-  <div class="modal">
+  <div class="modal modal-wide">
     <div class="modal-title">WebAPI 接入 · 网页版模型变免费 OpenAI 接口</div>
     <div class="modal-body">
       <div class="hint" style="margin:0 0 10px;padding:8px 10px;border-left:2px solid var(--info);background:var(--bg-soft,rgba(0,0,0,.03))">
@@ -625,7 +628,7 @@
 
 <!-- 自定义渠道弹层：添加/管理 OpenAI 兼容上游（入口在「账号管理」右上角） -->
 <div class="overlay hidden" id="customChannelOverlay">
-  <div class="modal">
+  <div class="modal modal-wide">
     <div class="modal-title">自定义渠道（OpenAI 兼容上游）</div>
     <div class="modal-body">
       <div class="hint" style="margin:0 0 10px;padding:8px 10px;border-left:2px solid var(--info);background:var(--bg-soft,rgba(0,0,0,.03))">
@@ -714,6 +717,11 @@
       <!-- 详细教程：各平台 base_url / 取 key / 常见模型 -->
       <details class="cc-details" style="margin-top:10px">
         <summary>各平台怎么填（完整教程）</summary>
+        <div class="hint" style="margin:6px 0">
+          只想查地址、不想在面板里填？可打开
+          <a href="/custom-channel-helper.html" target="_blank" rel="noreferrer">独立配置生成器</a>
+          ——选平台自动带出 base_url 与取 key 地址，生成的 JSON <b>可直接粘回「JSON 登录」</b>。
+        </div>
         <table class="cc-table">
           <thead><tr><th>平台</th><th>base_url</th><th>去哪拿 key</th><th>常见模型（示例，以拉取结果为准）</th></tr></thead>
           <tbody>
