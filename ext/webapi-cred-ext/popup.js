@@ -172,7 +172,13 @@ function bestEffort4(ctx, label) {
     level: "warn",
     text: JSON.stringify(doc, null, 2),
     raw: ctx.rawDump(),
-    usage: `${label} 的字段映射还没逐个验证过（猜中 ${filled}/3 个）。把 JSON 粘进
+    usage: `${label} 的字段映射还没逐个验证过（猜中 ${filled}/3 个）。
+      <br><b>本次读到的 Cookie 名</b>（只列名，可放心截图）：
+      <pre>${escNames(ctx.cookies)}</pre>
+      <b>localStorage 键名</b>：
+      <pre>${Object.keys(ctx.ls).slice(0, 40).join("\n") || "（空）"}</pre>
+      把这两块截图发我，我就能把${label}的规则写准（智谱要的是 refresh_token，不是 access_token）。
+      <br>把 JSON 粘进
       <b>WebAPI 接入 → duruoxian → ① 粘贴凭证</b> 后，请核对四项是否都有值；
       缺的那项点「复制原始数据」发我，我补一条精确规则。
       <br>另外这个平台<b>必须先在 duruoxian 里登录该平台账号</b>，否则上游没有它的模型。`,
