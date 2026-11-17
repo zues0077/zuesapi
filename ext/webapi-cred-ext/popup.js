@@ -64,21 +64,29 @@ const SITES = [
     },
   },
   {
-    // 讯飞星火的**主站**（xinghuo.xfyun.cn）与 Loomy（loomy.xunfei.cn）是两个站点：
-    // 网关的 loomy 渠道对接的是 loomyad.xunfei.cn，session 也只在 loomy 域名下。
-    // 用户实测就在主站上点扩展，看到"未识别"一头雾水 —— 这里明确指路。
-    id: "xinghuo-main",
-    name: "讯飞星火主站（不是 Loomy）",
+    // 讯飞星火网页版 → lzA6/xinghuo-2api 需要两样东西：
+    //   1) 整段 cookie（读取全部 Cookie，含 HttpOnly，拼成一行）→ XINGHUO_COOKIE
+    //   2) GtToken：它在请求的 **Form Data** 里，不是 Cookie 也不是 localStorage，
+    //      扩展读不到（那是页面 JS 运行时生成的表单字段），必须 F12 → Network → chat 请求 → Form Data 复制。
+    // 所以这里给 cookie，并明确提示 GtToken 要手取 —— 不糊弄用户。
+    id: "spark",
+    name: "讯飞星火网页版",
     hosts: ["xinghuo.xfyun.cn", "xfyun.cn"],
-    build: () => ({
-      level: "err",
-      text: "",
-      raw: "",
-      usage: `这里是<b>讯飞星火主站</b>，网关对接的 Loomy 是另一个站点。
-        <br>请打开 <a href="https://loomy.xunfei.cn" target="_blank">loomy.xunfei.cn</a>
-        （标题是「Loomy · 让工作更轻松」）并在那里登录，再点本扩展的「提取」。
-        <br>两个站的登录态不通用，主站的 Cookie 不能给 Loomy 用。`,
-    }),
+    build: (ctx) => {
+      const cookie = cookieString(ctx.cookies);
+      const usage = `两样东西分别填到 xinghuo-2api 的 <code>.env</code>：
+        <br>· <b>XINGHUO_COOKIE</b> ← 上面这行 cookie（已含 HttpOnly，直接整行粘）
+        <br>· <b>GT_TOKEN</b> ← 这个扩展读不到：它是请求 <b>Form Data</b> 里的字段，
+        需要 F12 → Network → 点一条 <code>chat</code> 请求 → Payload/Form Data → 复制 <code>GtToken</code>
+        <br>填好 <code>.env</code> 后 <code>docker-compose up -d --build</code>，
+        再把你自己设的 <code>API_MASTER_KEY</code> 填到网关的 api_key。`;
+      if (!cookie) {
+        return { level: "err", text: "", raw: ctx.rawDump(),
+          usage: `这个页面没有可读的 Cookie —— 确认已登录星火（能在对话框里发消息）再试；
+            仍为空就点「复制原始数据」发我，我看下它现在的 Cookie 结构。` };
+      }
+      return { level: "warn", text: cookie, raw: ctx.rawDump(), usage };
+    },
   },
   {
     id: "loomy",

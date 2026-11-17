@@ -118,11 +118,17 @@ const match = (u) => SITES.find((s) => s.hosts.some((h) => {
 check("匹配 chat.deepseek.com", match("https://chat.deepseek.com/a/chat")?.id === "deepseek");
 check("匹配 loomyad.xunfei.cn", match("https://loomyad.xunfei.cn/x")?.id === "loomy");
 check("不匹配无关站点", !match("https://www.baidu.com/"));
-// 星火主站要落到"去错站点"的提示规则，而不是落到 loomy 或未识别
-check("讯飞星火主站 -> xinghuo-main", match("https://xinghuo.xfyun.cn/desk")?.id === "xinghuo-main");
+// 星火网页版走 spark-free-api，提取 ssoSessionId（HttpOnly Cookie）
+check("xinghuo.xfyun.cn -> spark", match("https://xinghuo.xfyun.cn/desk")?.id === "spark");
+const xh = byId("spark").build({
+  ls: {}, cookies: [{ name: "ssoSessionId", value: "SSO-ABC", httpOnly: true }], rawDump: () => "{}",
+});
+check("spark 输出整行 cookie 且标 warn（GtToken 需手取）",
+  xh.level === "warn" && xh.text.includes("ssoSessionId=SSO-ABC") && xh.usage.includes("GT_TOKEN"));
+const xh2 = byId("spark").build({ ls: {}, cookies: [], rawDump: () => "{}" });
+check("spark 未登录 -> err 且引导复制原始数据",
+  xh2.level === "err" && xh2.usage.includes("原始数据"));
 check("Loomy 子域仍归 loomy", match("https://loomy.xunfei.cn/chat")?.id === "loomy");
-const xh = byId("xinghuo-main").build({ ls: {}, cookies: [], rawDump: () => "{}" });
-check("星火主站提示里给出 loomy.xunfei.cn", xh.level === "err" && xh.usage.includes("loomy.xunfei.cn"));
 
 console.log(fail === 0 ? "\n全部通过" : `\n${fail} 项失败`);
 process.exit(fail === 0 ? 0 : 1);
