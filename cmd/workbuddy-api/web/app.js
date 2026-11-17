@@ -1533,7 +1533,7 @@ async function submitJSONLogin() {
   // 直接写进 custom_channels，账号列表会按 tag 显示「自定义API」/「webAPI」。
   const chans = extractChannels(text);
   if (chans) {
-    const next = (state.custom_channels || []).slice();
+    const next = await fetchChannels();
     const names = new Set(next.map((c) => c.name));
     for (let i = 0; i < chans.length; i++) {
       const ch = normalizeChannel(chans[i], i);
@@ -2574,15 +2574,15 @@ function bindWebAPIEvents() {
     const conc = Number.isFinite(concRaw) && concRaw > 0 ? Math.min(concRaw, 32) : 2;
 
     if (!models.length) { err.textContent = "模型列表不能为空（可留默认，或用逗号分隔多个）"; return; }
-    const list = (state.custom_channels || []);
+    const list = await fetchChannels();
     if (list.some((c) => c.name === name)) { err.textContent = `渠道名「${name}」已存在，请改名`; return; }
 
     err.textContent = "";
-    const next = list.concat([{
+    list.push({
       name, base_url: src.base.replace(/\/+$/, ""), api_key: key,
       models, rate: 0, max_concurrency: conc, tag: "webapi",
-    }]);
-    await saveCustomChannels(next, `已添加 webAPI 账号「${name}」，重启网关后生效`);
+    });
+    await postChannels(list, `已添加 webAPI 账号「${name}」，重启网关后生效`);
     closeWebAPI();
   };
 }
@@ -2622,10 +2622,11 @@ function importCustomJSON() {
 // 虚拟账号没有 auth 文件，停用不能走 /api/accounts/disable（那条只改内存池，
 // 重启就复位），必须落到配置里才会持久。
 async function toggleCustomFrozen(name) {
-  const list = (state.custom_channels || []).map((c) =>
-    c.name === name ? Object.assign({}, c, { disabled: !c.disabled }) : c);
-  const target = list.find((c) => c.name === name);
-  await saveCustomChannels(list, target && target.disabled
+  const list = await fetchChannels();
+  const i = list.findIndex((c) => c.name === name);
+  if (i < 0) { toast(`配置里找不到「${name}」，请刷新页面后重试`, 6000); return; }
+  list[i] = Object.assign({}, list[i], { disabled: !list[i].disabled });
+  await postChannels(list, list[i].disabled
     ? `已冻结「${name}」，重启网关后不再参与调用`
     : `已启用「${name}」，重启网关后恢复调用`);
 }
@@ -2633,11 +2634,20 @@ async function toggleCustomFrozen(name) {
 // removeCustomChannel 删除整条自定义渠道配置。
 async function removeCustomChannel(name) {
   if (!confirm(`删除自定义渠道「${name}」？\n\n会同时移除它的 base_url / api_key / 模型配置，重启生效。`)) return;
-  const list = (state.custom_channels || []).filter((c) => c.name !== name);
-  await saveCustomChannels(list, `已删除「${name}」，重启网关后生效`);
+  const list = (await fetchChannels()).filter((c) => c.name !== name);
+  await postChannels(list, `已删除「${name}」，重启网关后生效`);
 }
 
-async function saveCustomChannels(list, okMsg) {
+// fetchChannels 取**服务端最新**的自定义渠道列表。
+// 为什么每个写操作前都要重新取：面板的 state 可能是几秒前的快照
+// （另一个标签页/另一个按钮刚加过），直接拿它当基底保存会把别人刚加的实例**冲掉**
+// —— 实测发生过一次：duruoxian 被 ces 那次保存覆盖没了，而运行中的池里还在。
+async function fetchChannels() {
+  const st = await api("/api/state");
+  return (st && st.custom_channels) || [];
+}
+
+async function postChannels(list, okMsg) {
   try {
     const res = await api("/api/config/custom_channels", { channels: list });
     state.custom_channels = list;
@@ -2645,111 +2655,26 @@ async function saveCustomChannels(list, okMsg) {
     $("ccErr").textContent = "";
     toast((okMsg || "已保存") + (res && res.restart_required ? "（需重启）" : ""), 6000);
     loadState();
+    return true;
   } catch (e) {
     $("ccErr").textContent = e.message;
+    toast("保存失败：" + e.message, 7000);
+    return false;
   }
 }
 
-async function saveSettings() {
-  // 1) 监听地址 + 管理密码（同请求提交：后端先存密码再切监听）
-  let host = $("selHost").value;
-  if (host === "__custom__") host = $("inHost").value.trim() || "127.0.0.1";
-  const port = parseInt($("inPort").value, 10);
-  const adminPass = $("adminPassInput").value.trim();
-  const listenBody = { host, port };
-  if (adminPass) listenBody.admin_password = adminPass; // 空 = 不改动，避免覆盖已设密码
-  try {
-    await api("/api/config/listen", listenBody);
-  } catch (e) { toast(e.message); return; }
-  // 刚设置/修改密码：旧会话已被作废，立即用新密码重新登录，保证本次保存的后续步骤可用。
-  // （从「本机监听 + 无密码」切到 0.0.0.0 时鉴权刚启用，此前根本没有 cookie。）
-  if (adminPass) {
-    try {
-      const r = await api("/api/auth/login", { password: adminPass });
-      authSession = r.session || "";
-    } catch (e) { toast(e.message); closeSettings(); showLogin("管理密码已变更，请重新登录"); return; }
-  }
-
-  // 1.5) 外网访问地址：只在真的改动时提交。它不参与监听绑定，仅决定顶栏显示/复制的
-  // API 地址；放在密码重登之后，保证这一步带着有效会话。
-  const pub = $("inPublicURL").value.trim();
-  if (pub !== (state.public_url || "")) {
-    try {
-      await api("/api/config/public_url", { url: pub });
-    } catch (e) { toast(e.message, 7000); return; }
-  }
-
-  // 2) 代理（先本地校验，失败阻断保存）
-  const [proxies, perr] = validateProxies();
-  if (perr) { $("proxyErr").textContent = perr; toast(perr); return; }
-  const body = { proxies };
-  try {
-    await api("/api/config/proxies", body);
-  } catch (e) { toast(e.message); return; }
-
-  // 3) 模型映射：优先读编辑器；编辑器从未展开过则用原值（保证「只改监听/渠道不碰映射」）
-  let modelMap = state.compat?.model_map || {};
-  if (!$("mapEditor").classList.contains("hidden")) {
-    const [parsed, err] = parseMapText($("mapText").value);
-    if (err) { $("mapErr").textContent = err; toast(err); return; }
-    modelMap = parsed;
-  }
-  // 多候选：优先读编辑器；编辑器从未展开过则用原值（保证「只改监听/渠道不碰多候选」）
-  let customModels = state.compat?.custom_models || {};
-  if (!$("multiMapEditor").classList.contains("hidden")) {
-    const [parsed, err] = parseMultiMapText($("multiMapText").value);
-    if (err) { $("multiErr").textContent = err; toast(err); return; }
-    customModels = parsed;
-  }
-  const defaultChannel = $("selCh").value;
-  const maxTokensCap = parseInt($("inMaxTok").value, 10) || 0;
-  try {
-    await api("/api/config/compat", {
-      default_channel: defaultChannel,
-      max_tokens_cap: maxTokensCap,
-      model_map: modelMap,
-      custom_models: customModels,
-    });
-  } catch (e) { toast(e.message); return; }
-
-  // 4) 临期阈值（1/2/3 天，独立端点即时生效）
-  const expDays = parseInt($("selExpiring").value, 10) || 1;
-  if (expDays !== (state.expiring_days || 1)) {
-    try {
-      await api("/api/config/expiring_days", { days: expDays });
-    } catch (e) { toast(e.message); return; }
-  }
-
-  // 4.5) 挑号策略（热更新到各渠道账号池，无需重启）
-  const strategy = $("selStrategy").value;
-  if (strategy && strategy !== (state.strategy || "expire")) {
-    try {
-      await api("/api/config/strategy", { strategy });
-    } catch (e) { toast(e.message); return; }
-  }
-
-  // 5) 成长中心自动化开关（四项，默认全关；保存后热生效，无需重启）
-  const growthBody = {
-    redeem_streak: $("chkGrowthRedeem").checked,
-    travel: $("chkGrowthTravel").checked,
-    travel_location: parseInt($("selTravelLoc").value, 10) || 1,
-    tasks: $("chkGrowthTasks").checked,
-    tasks_include_mp: $("chkGrowthTasksMP").checked,
-  };
-  try {
-    await api("/api/config/growth", growthBody);
-  } catch (e) { toast(e.message); return; }
-
-  // 6) API-Key（最后保存：改 Key 可能影响当前会话的后续请求）
-  try {
-    await api("/api/config/api_key", { key: $("keyInput").value.trim() });
-  } catch (e) { toast(e.message); return; }
-
-  // 7) 密码已在第 1 步生效（会话已换新），无需再强制重登
-  toast(adminPass ? "设置已保存，管理密码已生效" : "设置已保存");
-  closeSettings();
-  loadState();
+// saveCustomChannels 全量覆盖（仅在确实知道完整列表时用；内部先取最新再合并）
+async function saveCustomChannels(list, okMsg) {
+  const cur = await fetchChannels();
+  const byName = new Map(cur.map((c) => [c.name, c]));
+  for (const c of list) byName.set(c.name, c);
+  // list 里被显式删掉的（调用方已 filter）不能靠合并恢复 → 以 list 的 name 集合为准
+  const keep = new Set(list.map((c) => c.name));
+  const merged = [];
+  for (const [name, c] of byName) if (keep.has(name)) merged.push(c);
+  return postChannels(merged, okMsg);
 }
+
 
 // clearAdminPassword 「清除」按钮：关闭面板鉴权（仅环回监听允许，后端会校验）。
 async function clearAdminPassword() {
