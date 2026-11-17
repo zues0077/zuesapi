@@ -128,18 +128,62 @@ const SITES = [
     },
   },
   {
+    // 智谱：duruoxian 的 chatglm 适配器把 **account.auth_token 当 refresh_token** 读
+    // （adapters/chatglm/config.py:108）；refresh 令牌在 Cookie `chatglm_refresh_token`。
     id: "chatglm",
     name: "智谱 GLM 网页版",
     hosts: ["chatglm.cn"],
-    // 智谱/Kimi/通义 走的是 duruoxian 的四平台；它要的四个字段名在各站不同，
-    // 这里做「最佳猜名 + 原始数据兜底」，标 warn 表示需要在面板里核对。
-    build: (ctx) => bestEffort4(ctx, "智谱 GLM"),
+    build: (ctx) => {
+      const hit = findRefresh(ctx);
+      if (!hit) {
+        return {
+          level: "err", text: "", raw: ctx.rawDump(),
+          usage: `没找到 refresh_token（智谱必须用它，access_token 一小时就废）。
+            <br>已读到的键：<pre>${escStruct(ctx)}</pre>`,
+        };
+      }
+      const doc = { auth_token: hit.value, device_id: "", settings_token: "", cookie: cookieString(ctx.cookies) };
+      return {
+        level: "warn",
+        text: JSON.stringify(doc, null, 2),
+        raw: ctx.rawDump(),
+        usage: `refresh_token 取自 <code>${hit.from}</code>，已放进 <b>auth_token</b>
+          （适配器把 auth_token 当 refresh_token 读，别按字面理解）。
+          <br>粘到 <b>WebAPI → duruoxian → ① 粘贴凭证</b>，平台选「智谱 GLM」后点「拉取模型」确认。`,
+      };
+    },
   },
   {
+    // Kimi：auth_token = access_token，**settings_token = refresh_token**
+    // （adapters/kimi/config.py:123-127）。
     id: "kimi",
     name: "Kimi 网页版",
     hosts: ["www.kimi.com", "kimi.moonshot.cn"],
-    build: (ctx) => bestEffort4(ctx, "Kimi"),
+    build: (ctx) => {
+      const at = ctx.ls["access_token"] || "";
+      const rt = ctx.ls["refresh_token"] || "";
+      if (!rt) {
+        return {
+          level: "err", text: "", raw: ctx.rawDump(),
+          usage: `localStorage 里没找到 <code>refresh_token</code>（只有 access_token 撑不过 1 小时）。
+            <br>已读到的键：<pre>${escStruct(ctx)}</pre>`,
+        };
+      }
+      const doc = {
+        auth_token: at,
+        device_id: ctx.ls["msh_user_id"] || "",
+        settings_token: rt,
+        cookie: cookieString(ctx.cookies),
+      };
+      return {
+        level: "warn",
+        text: JSON.stringify(doc, null, 2),
+        raw: ctx.rawDump(),
+        usage: `access_token → <b>auth_token</b>，refresh_token → <b>settings_token</b>
+          （位置反直觉，但适配器就是这么读的）。
+          <br>粘到 <b>WebAPI → duruoxian → ① 粘贴凭证</b>，平台选「月之暗面 Kimi」。`,
+      };
+    },
   },
   {
     id: "qwen",
@@ -199,6 +243,34 @@ function escNames(cookies) {
   if (!cookies || !cookies.length) return "（一条都没读到）";
   return cookies.map((c) => c.name).slice(0, 40).join("\n");
 }
+
+// findRefresh 找 refresh 令牌：先按 localStorage 键名，再按 Cookie 名；
+// 都没命中时退一步认「键名带 token 且 JWT typ=refresh」。
+function findRefresh(ctx) {
+  for (const [k, v] of Object.entries(ctx.ls)) {
+    if (/refresh/i.test(k) && isLongToken(v)) return { value: v, from: "localStorage." + k };
+  }
+  for (const c of ctx.cookies) {
+    if (/refresh/i.test(c.name) && isLongToken(c.value)) return { value: c.value, from: "cookie." + c.name };
+  }
+  for (const [k, v] of Object.entries(ctx.ls)) {
+    if (/token/i.test(k) && isJWT(v) && /refresh/i.test(decodeJWTPayload(v).typ || "")) {
+      return { value: v, from: "localStorage." + k + "（JWT typ=refresh）" };
+    }
+  }
+  return null;
+}
+
+// decodeJWTPayload 不验签，只读 payload 判断 token 类型。
+function decodeJWTPayload(t) {
+  try {
+    const p = t.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
+    return JSON.parse(decodeURIComponent(escape(atob(p))));
+  } catch { return {}; }
+}
+
+// escStruct 结构诊断文本（名字/长度/前 8 字符）。
+function escStruct(ctx) { return buildStructureReport(ctx); }
 
 // buildStructureReport 结构诊断：列出每个 Cookie / localStorage 键的
 // 「名字 + 长度 + 前 8 字符」，足以判断哪个是 JWT、哪个是 id、哪个是 JSON 配置，

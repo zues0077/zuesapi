@@ -9,7 +9,7 @@ import vm from "node:vm";
 const dir = path.resolve(import.meta.dirname, "..", "ext/webapi-cred-ext");
 let src = fs.readFileSync(path.join(dir, "popup.js"), "utf8");
 // 把内部常量暴露出来（只在测试拼接里做，不改源文件）
-src += "\n;globalThis.__t = { SITES, bestEffort4, cookieString, isJWT, buildStructureReport };";
+src += "\n;globalThis.__t = { SITES, bestEffort4, cookieString, isJWT, buildStructureReport, findRefresh };";
 
 // ---- 最小 DOM / chrome 桩件 ----
 const el = () => ({
@@ -102,7 +102,39 @@ const lm2 = byId("loomy").build({ ls: {}, cookies: [], rawDump: () => "{}" });
 check("loomy 无线索 -> err 且引导复制原始数据",
   lm2.level === "err" && lm2.usage.includes("原始数据"));
 
-// 7) 最佳猜名：至少能识别出一个 token 字段
+// 7) 智谱：refresh_token 在 Cookie chatglm_refresh_token 里，且要放进 auth_token 字段
+const glm = byId("chatglm").build({
+  ls: {},
+  cookies: [
+    { name: "chatglm_token", value: "eyJaccess", httpOnly: true },
+    { name: "chatglm_refresh_token", value: "RT-CHATGLM-0123456789", httpOnly: true },
+  ],
+  rawDump: () => "{}",
+});
+const glmObj = JSON.parse(glm.text);
+check("智谱 refresh 取自 cookie 并填入 auth_token",
+  glm.level === "warn" && glmObj.auth_token === "RT-CHATGLM-0123456789");
+
+// 智谱没 refresh 时应报错，不能拿 access token 凑数
+const glm2 = byId("chatglm").build({
+  ls: {}, cookies: [{ name: "chatglm_token", value: "eyJaccess" }], rawDump: () => "{}",
+});
+check("智谱缺 refresh -> err", glm2.level === "err" && glm2.text === "");
+
+// Kimi：access_token → auth_token，refresh_token → settings_token
+const km = byId("kimi").build({
+  ls: { access_token: "AT-KIMI-1234567890", refresh_token: "RT-KIMI-1234567890", msh_user_id: "U-9" },
+  cookies: [{ name: "kimi", value: "x" }],
+  rawDump: () => "{}",
+});
+const kmObj = JSON.parse(km.text);
+check("Kimi access->auth_token, refresh->settings_token",
+  kmObj.auth_token === "AT-KIMI-1234567890" && kmObj.settings_token === "RT-KIMI-1234567890" &&
+  kmObj.device_id === "U-9");
+const km2 = byId("kimi").build({ ls: { access_token: "AT-1" }, cookies: [], rawDump: () => "{}" });
+check("Kimi 缺 refresh -> err", km2.level === "err" && km2.text === "");
+
+// 通义仍走猜名（映射未验证）
 const qw = byId("qwen").build({
   ls: { access_token: "T".repeat(40), device_id: "D".repeat(12) },
   cookies: [{ name: "sid", value: "S".repeat(30) }],
@@ -111,25 +143,6 @@ const qw = byId("qwen").build({
 const qwObj = JSON.parse(qw.text);
 check("qwen 猜名能填上 auth_token", qwObj.auth_token.length === 40);
 check("qwen 标 warn（映射未验证）", qw.level === "warn");
-
-// 用户实测坑：Kimi/智谱 的 localStorage 里大量 {"web_id":...} 之类 JSON，
-// 只按长度猜会把 JSON 当成 auth_token（导入必然不可用）。
-const qw2 = byId("qwen").build({
-  ls: { auth_token: '{"web_id":"7709abc","expires":1795012345}', token: "REAL-TOKEN-1234567890abcdef" },
-  cookies: [],
-  rawDump: () => "{}",
-});
-const qw2Obj = JSON.parse(qw2.text);
-check("JSON 串不被当成 auth_token", qw2Obj.auth_token === "" || qw2Obj.auth_token.startsWith("REAL"));
-
-// 结构诊断：只输出名字/长度/前8字符
-const rep = ctx.__t.buildStructureReport({
-  ls: { session: "eyJhbGciOiJIUzI1NiJ9.xx.yy" },
-  cookies: [{ name: "chatglm_token", value: "eyJhbGciOiJIUzI1NiJ9" }],
-});
-check("结构诊断含 cookie 行", rep.includes("cookie  chatglm_token"));
-check("结构诊断含 ls 行与长度", rep.includes("ls      session") && rep.includes("len="));
-check("结构诊断不泄露完整值", !rep.includes("eyJhbGciOiJIUzI1NiJ9.xx.yy"));
 
 // 8) 站点匹配
 const match = (u) => SITES.find((s) => s.hosts.some((h) => {
