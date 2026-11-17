@@ -2340,35 +2340,38 @@ function renderWebAPICards() {
         <button type="button" class="btn small primary wa-open">接入这个源</button>
       </div>
       <div class="wa-form hidden">
-        <div class="row" style="margin-top:8px">
-          <label class="lbl wide">名称</label>
-          <input class="input grow" data-f="name" value="${esc(s.id)}" spellcheck="false">
-        </div>
-        <div class="row" style="margin-top:6px">
+        <div class="row" style="margin-top:10px">
           <label class="lbl wide">api_key</label>
           <input class="input grow" data-f="key" placeholder="${esc(s.keyHint)}" spellcheck="false">
         </div>
-        ${s.platforms ? `<div class="row" style="margin-top:6px">
-          <label class="lbl wide">平台</label>
-          <select class="input grow wa-plat">
-            ${s.platforms.map((pf, i) => `<option value="${i}"${i === s.platforms.length - 1 ? " selected" : ""}>${esc(pf.label)}</option>`).join("")}
-          </select>
-        </div>` : ""}
-        <div class="row" style="margin-top:6px">
-          <label class="lbl wide">模型</label>
-          <div class="grow">
-            <div class="row">
-              <input class="input grow" data-f="models" value="${esc(s.models.join(", "))}" spellcheck="false">
-              <button type="button" class="btn tiny wa-probe" style="margin-left:6px">拉取模型</button>
-            </div>
-            <div class="hint wa-probe-msg" style="margin-top:4px">模型名会随上游更新，随时点「拉取模型」刷新</div>
+        <details class="wa-adv" style="margin-top:6px">
+          <summary class="hint">高级设置（名称 / 平台 / 模型 / 并发）—— 不改也能用</summary>
+          <div class="row" style="margin-top:6px">
+            <label class="lbl wide">名称</label>
+            <input class="input grow" data-f="name" value="${esc(s.id)}" spellcheck="false">
           </div>
-        </div>
-        <div class="row" style="margin-top:6px">
-          <label class="lbl wide">并发上限</label>
-          <input class="input" data-f="conc" type="number" min="1" max="32" value="2" style="width:110px">
-          <span class="hint" style="margin-left:8px">默认 2，避免免费源被并发打爆</span>
-        </div>
+          ${s.platforms ? `<div class="row" style="margin-top:6px">
+            <label class="lbl wide">平台</label>
+            <select class="input grow wa-plat">
+              ${s.platforms.map((pf, i) => `<option value="${i}"${i === 0 ? " selected" : ""}>${esc(pf.label)}</option>`).join("")}
+            </select>
+          </div>` : ""}
+          <div class="row" style="margin-top:6px">
+            <label class="lbl wide">模型</label>
+            <div class="grow">
+              <div class="row">
+                <input class="input grow" data-f="models" value="${esc(s.models.join(", "))}" spellcheck="false">
+                <button type="button" class="btn tiny wa-probe" style="margin-left:6px">拉取模型</button>
+              </div>
+              <div class="hint wa-probe-msg" style="margin-top:4px">模型名会随上游更新，随时点「拉取模型」刷新</div>
+            </div>
+          </div>
+          <div class="row" style="margin-top:6px">
+            <label class="lbl wide">并发上限</label>
+            <input class="input" data-f="conc" type="number" min="1" max="32" value="2" style="width:110px">
+            <span class="hint" style="margin-left:8px">默认 2，避免免费源被并发打爆</span>
+          </div>
+        </details>
         <div class="wa-err hint" style="color:var(--danger,#dc2626);margin-top:6px"></div>
         <div class="row" style="margin-top:8px">
           <button type="button" class="btn small primary wa-submit">添加为 webAPI 账号</button>

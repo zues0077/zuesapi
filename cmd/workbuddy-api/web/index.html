@@ -599,7 +599,9 @@
         · 网关按模型名分发：<code>customopenai/deepseek-chat</code> → duruoxian，
         <code>customopenai/gemini-3.5-flash</code> → gemini；<br>
         · 三个可以只加一个，也可以全加（等价于「多了一个付费源/免费源」，不是多一套接口）。<br>
-        唯一要注意：<b>不同源的模型名别重名</b>，重名会按选号顺序落到其中一个。
+        唯一要注意：<b>不同源的模型名别重名</b>，重名会按选号顺序落到其中一个。<br>
+        <b>卡片上的 8800 / 8081 / 19999 是「网关→上游」的内部端口，客户端永远看不到</b>，
+        也不用记——客户端只认网关那一个 <code>/v1</code>。
       </div>
 
       <div id="webapiCards"></div>
