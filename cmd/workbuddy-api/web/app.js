@@ -1903,8 +1903,11 @@ async function toggleAutostart() {
 
 // ---------- 设置弹层（统一配置：监听/API-Key/签到/自启/模型路由/渠道代理） ----------
 // PROXY_CHANNELS 渠道上游代理列表（顺序与面板渠道序一致；旧 qoder 已下线不提供代理配置）。
-const PROXY_CHANNELS = ["workbuddy", "workbuddyai", "qodercn", "qodercom", "traework", "qwenwork", "glm", "monkeycode", "raccoon", "loomy"];
-const PROXY_HINT = { workbuddy: "WorkBuddyCN", workbuddyai: "WorkBuddyAI", traework: "TraeWork", qodercn: "QoderCN", qodercom: "QoderCOM", qwenwork: "千问办公", glm: "智谱清言" };
+const PROXY_CHANNELS = ["workbuddy", "workbuddyai", "qodercn", "qodercom", "traework", "qwenwork", "glm", "monkeycode", "raccoon", "loomy", "customopenai"];
+// 自定义渠道：后端 proxyClientMap 里早已给 customopenai 套过代理，只是面板一直没给这一行，
+// 导致「面板改了没入口」。注意它是**整个渠道**级别（所有自定义实例共用），
+// 本地 127.0.0.1 的反代源通常不需要代理（保持留空）。
+const PROXY_HINT = { workbuddy: "WorkBuddyCN", workbuddyai: "WorkBuddyAI", traework: "TraeWork", qodercn: "QoderCN", qodercom: "QoderCOM", qwenwork: "千问办公", glm: "智谱清言", customopenai: "自定义渠道（全部实例共用）" };
 
 // renderProxyList 按当前 state.proxies 渲染每渠道一个输入行。
 function renderProxyList() {
@@ -2230,6 +2233,16 @@ const WEBAPI_SOURCES = [
     login: "要登录（飞牛上没有内置浏览器，改用手动粘凭证）",
     bookmarklet: true,
     models: ["deepseek-chat", "deepseek-reasoner", "GLM-5.3", "kimi-k3", "qwen3.7-plus"],
+    // 四个平台各自一套模型。电脑端点选平台即可，不必知道模型名——
+    // 这里照搬同样的体验：选平台 → 自动填模型；想知道上游真实清单再点「拉取模型」。
+    platforms: [
+      { id: "all", label: "全部平台（DeepSeek + 智谱 + Kimi + 通义）",
+        models: ["deepseek-chat", "deepseek-reasoner", "GLM-5.3", "kimi-k3", "qwen3.7-plus"] },
+      { id: "deepseek", label: "DeepSeek（对话 / 推理）", models: ["deepseek-chat", "deepseek-reasoner"] },
+      { id: "glm", label: "智谱 GLM", models: ["GLM-5.3"] },
+      { id: "kimi", label: "月之暗面 Kimi", models: ["kimi-k3"] },
+      { id: "qwen", label: "通义千问", models: ["qwen3.7-plus"] },
+    ],
     alt: "跑在电脑上时把 127.0.0.1 换成电脑局域网 IP（如 192.168.1.50:8800）",
     repo: "https://github.com/duruoxian/webai2api",
     steps: [
@@ -2265,20 +2278,26 @@ const WEBAPI_SOURCES = [
 // 为什么不只给 F12 片段：用户明确说"不想再单独跑脚本/敲命令"——
 // 书签栏拖一下就永久存在，在 deepseek 页面点一下即可把四个字段写进剪贴板，
 // 比 F12 → Console → 粘贴 → 回车 少三步，也不用装任何扩展。
+// buildCredBookmarklet 生成「一键取 deepseek 凭证」的书签脚本。
+// 实测坑（用户第一次点就撞上）：在面板页（http）点它 → navigator.clipboard 不存在，
+// 报 "Cannot read properties of undefined (reading 'writeText')"。
+// 所以：①先校验当前域名是不是 deepseek，不是就明确提示；②剪贴板 API 不可用时
+// 回落到 textarea + execCommand；③每个字段单独 try/catch，别一个字段坏就全崩。
 function buildCredBookmarklet() {
   const NL = "String.fromCharCode(10)";
   const code = [
-    "(function(){try{",
-    "var t=localStorage.getItem('userToken');",
-    "var d=localStorage.getItem('deepseek-device-id:chat');",
-    "var s=localStorage.getItem('settingsJwt');",
-    "var o={auth_token:t?JSON.parse(t).value:'',device_id:d||'',",
-    "settings_token:s?JSON.parse(s).value.jwt:'',cookie:document.cookie};",
+    "(function(){",
+    "var h=location.hostname||'';",
+    "if(h.indexOf('deepseek')<0){alert('请先在 chat.deepseek.com 页面点本书签'+" + NL + "+'当前页面是：'+h);return}",
+    "function g(k){try{return localStorage.getItem(k)}catch(e){return null}}",
+    "function bm(){var ta=document.createElement('textarea');ta.value=j;document.body.appendChild(ta);ta.select();var ok=false;try{ok=document.execCommand('copy')}catch(e){}document.body.removeChild(ta);if(ok){alert('已复制 deepseek 凭证，回面板粘到「手动粘贴凭证」')}else{prompt('自动复制失败，请手动复制：',j)}}",
+    "var t=g('userToken'),d=g('deepseek-device-id:chat'),s=g('settingsJwt');",
+    "var at='',st='';try{at=t?JSON.parse(t).value:(t||'')}catch(e){at=t||''}",
+    "try{st=s?JSON.parse(s).value.jwt:(s||'')}catch(e){st=s||''}",
+    "var o={auth_token:at,device_id:d||'',settings_token:st,cookie:document.cookie};",
     "var j=JSON.stringify(o,null,2);",
-    "navigator.clipboard.writeText(j).then(",
-    "function(){alert('已复制 deepseek 凭证，去面板「账号管理 → 添加账号 → 手动粘贴凭证」粘贴')},",
-    "function(){prompt('自动复制失败，请手动复制：',j)});",
-    "}catch(e){alert('取凭证失败：'+e+String.fromCharCode(10)+'请确认已登录 deepseek 网页版')}})()",
+    "if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(j).then(function(){alert('已复制 deepseek 凭证，回面板粘到「手动粘贴凭证」')},bm)}else{bm()}",
+    "})()",
   ].join("");
   return "javascript:" + encodeURIComponent(code);
 }
@@ -2329,6 +2348,12 @@ function renderWebAPICards() {
           <label class="lbl wide">api_key</label>
           <input class="input grow" data-f="key" placeholder="${esc(s.keyHint)}" spellcheck="false">
         </div>
+        ${s.platforms ? `<div class="row" style="margin-top:6px">
+          <label class="lbl wide">平台</label>
+          <select class="input grow wa-plat">
+            ${s.platforms.map((pf, i) => `<option value="${i}"${i === s.platforms.length - 1 ? " selected" : ""}>${esc(pf.label)}</option>`).join("")}
+          </select>
+        </div>` : ""}
         <div class="row" style="margin-top:6px">
           <label class="lbl wide">模型</label>
           <div class="grow">
@@ -2377,6 +2402,17 @@ function bindWebAPIEvents() {
       return;
     }
     if (e.target.closest(".wa-cancel")) { form.classList.add("hidden"); return; }
+    if (e.target.closest(".wa-plat")) {
+      const src2 = WEBAPI_SOURCES.find((x) => x.id === card.dataset.src);
+      const idx = parseInt(e.target.value, 10) || 0;
+      const pf = src2.platforms && src2.platforms[idx];
+      if (pf) {
+        card.querySelector('[data-f="models"]').value = pf.models.join(", ");
+        const msg = card.querySelector(".wa-probe-msg");
+        if (msg) msg.textContent = `已按「${pf.label}」填入模型；想确认上游真实清单可点「拉取模型」`;
+      }
+      return;
+    }
     if (e.target.closest(".wa-copy-bm")) {
       e.preventDefault();
       const code = decodeURIComponent(buildCredBookmarklet().replace(/^javascript:/, ""));
