@@ -2214,9 +2214,9 @@ const WEBAPI_SOURCES = [
     recommend: true,
     where: "飞牛或任意装 Python 的机器（一条命令）",
     base: "http://127.0.0.1:8081/v1",
-    keyHint: "零鉴权：key 随便填，如 sk-any",
+    keyHint: "看它目录里 config.json 的 api_keys（没配时随便填）",
     login: "不用登录",
-    models: ["gemini-3.5-flash", "gemini-3.5-flash-thinking", "gemini-3.5-pro"],
+    models: ["gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash-thinking", "gemini-3.1-pro", "gemini-auto"],
     alt: "跑在别的机器上时，把 127.0.0.1 换成那台机器的局域网 IP",
     repo: "https://github.com/Sophomoresty/gemini-web2api",
     steps: [
@@ -2237,6 +2237,7 @@ const WEBAPI_SOURCES = [
     login: "要登录（飞牛上没有内置浏览器，改用手动粘凭证）",
     bookmarklet: true,
     importCred: true,
+    canAutoKey: true,
     models: ["deepseek-chat", "deepseek-reasoner", "GLM-5.3", "kimi-k3", "qwen3.7-plus"],
     // 四个平台各自一套模型。电脑端点选平台即可，不必知道模型名——
     // 这里照搬同样的体验：选平台 → 自动填模型；想知道上游真实清单再点「拉取模型」。
@@ -2408,9 +2409,9 @@ function renderWebAPICards() {
           <div class="grow">
             <div class="row">
               <input class="input grow" data-f="key" placeholder="${esc(s.keyHint)}" spellcheck="false">
-              <button type="button" class="btn tiny wa-getkey" style="margin-left:6px">自动获取</button>
+              ${s.canAutoKey ? '<button type="button" class="btn tiny wa-getkey" style="margin-left:6px">自动获取</button>' : ""}
             </div>
-            <div class="hint wa-getkey-msg" style="margin-top:4px">不知道填什么就点「自动获取」：网关会去该服务里取现成的 Key，没有就新建一个</div>
+            <div class="hint wa-getkey-msg" style="margin-top:4px">${s.canAutoKey ? "不知道填什么就点「自动获取」：网关会去该服务里取现成的 Key，没有就新建一个" : "这个源的 Key 只能从它自己的配置里拿（见上方「怎么做」），网关没法代取"}</div>
           </div>
         </div>
         <details class="wa-adv" style="margin-top:6px">
