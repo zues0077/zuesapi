@@ -9,7 +9,7 @@ import vm from "node:vm";
 const dir = path.resolve(import.meta.dirname, "..", "ext/webapi-cred-ext");
 let src = fs.readFileSync(path.join(dir, "popup.js"), "utf8");
 // 把内部常量暴露出来（只在测试拼接里做，不改源文件）
-src += "\n;globalThis.__t = { SITES, bestEffort4, cookieString, isJWT };";
+src += "\n;globalThis.__t = { SITES, bestEffort4, cookieString, isJWT, buildStructureReport };";
 
 // ---- 最小 DOM / chrome 桩件 ----
 const el = () => ({
@@ -111,6 +111,25 @@ const qw = byId("qwen").build({
 const qwObj = JSON.parse(qw.text);
 check("qwen 猜名能填上 auth_token", qwObj.auth_token.length === 40);
 check("qwen 标 warn（映射未验证）", qw.level === "warn");
+
+// 用户实测坑：Kimi/智谱 的 localStorage 里大量 {"web_id":...} 之类 JSON，
+// 只按长度猜会把 JSON 当成 auth_token（导入必然不可用）。
+const qw2 = byId("qwen").build({
+  ls: { auth_token: '{"web_id":"7709abc","expires":1795012345}', token: "REAL-TOKEN-1234567890abcdef" },
+  cookies: [],
+  rawDump: () => "{}",
+});
+const qw2Obj = JSON.parse(qw2.text);
+check("JSON 串不被当成 auth_token", qw2Obj.auth_token === "" || qw2Obj.auth_token.startsWith("REAL"));
+
+// 结构诊断：只输出名字/长度/前8字符
+const rep = ctx.__t.buildStructureReport({
+  ls: { session: "eyJhbGciOiJIUzI1NiJ9.xx.yy" },
+  cookies: [{ name: "chatglm_token", value: "eyJhbGciOiJIUzI1NiJ9" }],
+});
+check("结构诊断含 cookie 行", rep.includes("cookie  chatglm_token"));
+check("结构诊断含 ls 行与长度", rep.includes("ls      session") && rep.includes("len="));
+check("结构诊断不泄露完整值", !rep.includes("eyJhbGciOiJIUzI1NiJ9.xx.yy"));
 
 // 8) 站点匹配
 const match = (u) => SITES.find((s) => s.hosts.some((h) => {

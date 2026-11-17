@@ -188,12 +188,33 @@ function bestEffort4(ctx, label) {
 // ---------- 工具 ----------
 const parseJSON = (s) => { try { return JSON.parse(s); } catch { return null; } };
 const isJWT = (v) => typeof v === "string" && v.startsWith("eyJ") && (v.match(/\./g) || []).length >= 2;
-const isLongToken = (v) => typeof v === "string" && v.length >= 20;
+// isLongToken 判定"像 token"，必须排除 JSON 串与明显是配置对象的取值。
+// 实测教训：Kimi/智谱 页面里 localStorage 有大量 {"web_id":...} / {"expires":...}，
+// 只按长度猜会把它们当成 auth_token，导入后必然不可用。
+const isLongToken = (v) => typeof v === "string" && v.length >= 20 &&
+  !/^[\s]*[\[{]/.test(v) && v.includes(" ") === false;
 
 // escNames 只输出 Cookie 名（不输出值）：排障时看名单就够，避免把凭证暴露在截图里。
 function escNames(cookies) {
   if (!cookies || !cookies.length) return "（一条都没读到）";
   return cookies.map((c) => c.name).slice(0, 40).join("\n");
+}
+
+// buildStructureReport 结构诊断：列出每个 Cookie / localStorage 键的
+// 「名字 + 长度 + 前 8 字符」，足以判断哪个是 JWT、哪个是 id、哪个是 JSON 配置，
+// 又不会把完整凭证暴露在截图里。给"猜名不准"的平台（智谱/Kimi/通义）定位用。
+function buildStructureReport(ctx) {
+  const rows = [];
+  for (const c of ctx.cookies) {
+    const v = c.value || "";
+    rows.push(`cookie  ${c.name}  len=${v.length}  head=${v.slice(0, 8)}`);
+  }
+  for (const [k, v] of Object.entries(ctx.ls)) {
+    const sv = typeof v === "string" ? v : JSON.stringify(v);
+    rows.push(`ls      ${k}  len=${sv.length}  head=${sv.slice(0, 8)}`);
+  }
+  rows.sort();
+  return rows.join("\n") || "（没读到任何 Cookie 或 localStorage）";
 }
 
 function cookieString(cookies) {

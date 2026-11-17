@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "WebAPI 凭证提取器",
-  "version": "1.3.3",
+  "version": "1.3.4",
   "description": "为 wb2api 网关一键提取网页版模型的登录凭证：DeepSeek / 讯飞星火 Loomy / Gemini / 智谱 GLM / Kimi / 通义千问。支持读取 HttpOnly Cookie。",
   "permissions": [
     "cookies",
