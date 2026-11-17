@@ -144,6 +144,27 @@ const qwObj = JSON.parse(qw.text);
 check("qwen 猜名能填上 auth_token", qwObj.auth_token.length === 40);
 check("qwen 标 warn（映射未验证）", qw.level === "warn");
 
+// 国内站（qianwen.com）：要 cookie + XSRF-TOKEN，且 xsrf 要 URL 解码
+const qcn = byId("qwen").build({
+  url: "https://www.qianwen.com/chat/abc",
+  ls: {},
+  cookies: [
+    { name: "tongyi_sso_ticket", value: "ticket-123" },
+    { name: "XSRF-TOKEN", value: "abc%2Bdef%3D" },
+  ],
+  rawDump: () => "{}",
+});
+const qcnObj = JSON.parse(qcn.text);
+check("qianwen.com 提取 xsrf 并解码",
+  qcn.level === "ok" && qcnObj.xsrf_token === "abc+def=" && qcnObj.sso_ticket === "ticket-123");
+
+// 只有 ticket 没 xsrf → warn（提示可走 ticket 方案）
+const qcn2 = byId("qwen").build({
+  url: "https://www.qianwen.com/chat/abc", ls: {},
+  cookies: [{ name: "tongyi_sso_ticket", value: "ticket-123" }], rawDump: () => "{}",
+});
+check("qianwen.com 只有 ticket -> warn", qcn2.level === "warn" && qcn2.text.includes("ticket-123"));
+
 // 8) 站点匹配
 const match = (u) => SITES.find((s) => s.hosts.some((h) => {
   const host = new URL(u).hostname;

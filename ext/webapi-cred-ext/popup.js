@@ -188,8 +188,46 @@ const SITES = [
   {
     id: "qwen",
     name: "通义千问 网页版",
-    hosts: ["chat.qwen.ai"],
-    build: (ctx) => bestEffort4(ctx, "通义千问"),
+    // 三个域名都要认：
+    //   chat.qwen.ai    → 国际站（要 cookie + Authorization + bx-ua）
+    //   www.qianwen.com → 国内站新版（要 cookie + XSRF-TOKEN）
+    //   qianwen.com     → 同上，去掉 www
+    // 之前只写了 chat.qwen.ai，用户在国内站上点提取直接提示"未识别"，白折腾一轮。
+    hosts: ["chat.qwen.ai", "www.qianwen.com", "qianwen.com"],
+    build: (ctx) => {
+      const pageUrl = ctx.url || (ctx.tab && ctx.tab.url) || "";
+      if (/qianwen\.com/i.test(pageUrl)) {
+        // 国内站：Qwen-2api 要 CN_ACCOUNT_1_COOKIE + CN_ACCOUNT_1_XSRF_TOKEN。
+        // XSRF-TOKEN 挂在 www.qianwen.com 域下（qwen-live 子域不发送它，
+        // 所以从 F12 的 qwen-live 请求里永远看不到 —— 用户就这样卡住过）。
+        const find = (n) => (ctx.cookies.find((c) => c.name.toUpperCase() === n.toUpperCase()) || {}).value || "";
+        const xsrfRaw = find("XSRF-TOKEN");
+        const ticket = find("tongyi_sso_ticket");
+        let xsrf = xsrfRaw;
+        try { xsrf = decodeURIComponent(xsrfRaw); } catch (e) { /* 保持原值 */ }
+        const doc = { cookie: cookieString(ctx.cookies), xsrf_token: xsrf, sso_ticket: ticket };
+        if (!xsrf && !ticket) {
+          return {
+            level: "err", text: "", raw: ctx.rawDump(),
+            usage: `既没有 <code>XSRF-TOKEN</code> 也没有 <code>tongyi_sso_ticket</code>
+              —— 说明这个页面没登录态。请确认左上角是你的账号后再提取。
+              <br>读到的键：<pre>${escStruct(ctx)}</pre>`,
+          };
+        }
+        return {
+          level: xsrf ? "ok" : "warn",
+          text: JSON.stringify(doc, null, 2),
+          raw: ctx.rawDump(),
+          usage: xsrf
+            ? `已取到 <b>cookie</b> + <b>xsrf_token</b>（Qwen-2api 直接能用）。
+              <br>本地服务配 <code>CN_ACCOUNT_1_COOKIE</code> / <code>CN_ACCOUNT_1_XSRF_TOKEN</code>。`
+            : `只拿到 <b>sso_ticket</b>，没有 XSRF-TOKEN（可用 qwen-free-api：ticket 直接当 Bearer）。
+              <br>若想走 Qwen-2api，请在 <code>www.qianwen.com</code> 域下确认 XSRF-TOKEN 是否存在。`,
+        };
+      }
+      // 国际站仍走猜名（需要 cookie + Authorization + bx-ua，字段名未逐个验证）
+      return bestEffort4(ctx, "通义千问（国际站）");
+    },
   },
 ];
 
