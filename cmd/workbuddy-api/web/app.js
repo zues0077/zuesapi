@@ -2663,6 +2663,107 @@ async function postChannels(list, okMsg) {
   }
 }
 
+async function saveSettings() {
+  // 1) 监听地址 + 管理密码（同请求提交：后端先存密码再切监听）
+  let host = $("selHost").value;
+  if (host === "__custom__") host = $("inHost").value.trim() || "127.0.0.1";
+  const port = parseInt($("inPort").value, 10);
+  const adminPass = $("adminPassInput").value.trim();
+  const listenBody = { host, port };
+  if (adminPass) listenBody.admin_password = adminPass; // 空 = 不改动，避免覆盖已设密码
+  try {
+    await api("/api/config/listen", listenBody);
+  } catch (e) { toast(e.message); return; }
+  // 刚设置/修改密码：旧会话已被作废，立即用新密码重新登录，保证本次保存的后续步骤可用。
+  // （从「本机监听 + 无密码」切到 0.0.0.0 时鉴权刚启用，此前根本没有 cookie。）
+  if (adminPass) {
+    try {
+      const r = await api("/api/auth/login", { password: adminPass });
+      authSession = r.session || "";
+    } catch (e) { toast(e.message); closeSettings(); showLogin("管理密码已变更，请重新登录"); return; }
+  }
+
+  // 1.5) 外网访问地址：只在真的改动时提交。它不参与监听绑定，仅决定顶栏显示/复制的
+  // API 地址；放在密码重登之后，保证这一步带着有效会话。
+  const pub = $("inPublicURL").value.trim();
+  if (pub !== (state.public_url || "")) {
+    try {
+      await api("/api/config/public_url", { url: pub });
+    } catch (e) { toast(e.message, 7000); return; }
+  }
+
+  // 2) 代理（先本地校验，失败阻断保存）
+  const [proxies, perr] = validateProxies();
+  if (perr) { $("proxyErr").textContent = perr; toast(perr); return; }
+  const body = { proxies };
+  try {
+    await api("/api/config/proxies", body);
+  } catch (e) { toast(e.message); return; }
+
+  // 3) 模型映射：优先读编辑器；编辑器从未展开过则用原值（保证「只改监听/渠道不碰映射」）
+  let modelMap = state.compat?.model_map || {};
+  if (!$("mapEditor").classList.contains("hidden")) {
+    const [parsed, err] = parseMapText($("mapText").value);
+    if (err) { $("mapErr").textContent = err; toast(err); return; }
+    modelMap = parsed;
+  }
+  // 多候选：优先读编辑器；编辑器从未展开过则用原值（保证「只改监听/渠道不碰多候选」）
+  let customModels = state.compat?.custom_models || {};
+  if (!$("multiMapEditor").classList.contains("hidden")) {
+    const [parsed, err] = parseMultiMapText($("multiMapText").value);
+    if (err) { $("multiErr").textContent = err; toast(err); return; }
+    customModels = parsed;
+  }
+  const defaultChannel = $("selCh").value;
+  const maxTokensCap = parseInt($("inMaxTok").value, 10) || 0;
+  try {
+    await api("/api/config/compat", {
+      default_channel: defaultChannel,
+      max_tokens_cap: maxTokensCap,
+      model_map: modelMap,
+      custom_models: customModels,
+    });
+  } catch (e) { toast(e.message); return; }
+
+  // 4) 临期阈值（1/2/3 天，独立端点即时生效）
+  const expDays = parseInt($("selExpiring").value, 10) || 1;
+  if (expDays !== (state.expiring_days || 1)) {
+    try {
+      await api("/api/config/expiring_days", { days: expDays });
+    } catch (e) { toast(e.message); return; }
+  }
+
+  // 4.5) 挑号策略（热更新到各渠道账号池，无需重启）
+  const strategy = $("selStrategy").value;
+  if (strategy && strategy !== (state.strategy || "expire")) {
+    try {
+      await api("/api/config/strategy", { strategy });
+    } catch (e) { toast(e.message); return; }
+  }
+
+  // 5) 成长中心自动化开关（四项，默认全关；保存后热生效，无需重启）
+  const growthBody = {
+    redeem_streak: $("chkGrowthRedeem").checked,
+    travel: $("chkGrowthTravel").checked,
+    travel_location: parseInt($("selTravelLoc").value, 10) || 1,
+    tasks: $("chkGrowthTasks").checked,
+    tasks_include_mp: $("chkGrowthTasksMP").checked,
+  };
+  try {
+    await api("/api/config/growth", growthBody);
+  } catch (e) { toast(e.message); return; }
+
+  // 6) API-Key（最后保存：改 Key 可能影响当前会话的后续请求）
+  try {
+    await api("/api/config/api_key", { key: $("keyInput").value.trim() });
+  } catch (e) { toast(e.message); return; }
+
+  // 7) 密码已在第 1 步生效（会话已换新），无需再强制重登
+  toast(adminPass ? "设置已保存，管理密码已生效" : "设置已保存");
+  closeSettings();
+  loadState();
+}
+
 // saveCustomChannels 全量覆盖（仅在确实知道完整列表时用；内部先取最新再合并）
 async function saveCustomChannels(list, okMsg) {
   const cur = await fetchChannels();

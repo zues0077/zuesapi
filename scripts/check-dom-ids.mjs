@@ -29,4 +29,25 @@ if (missing.length) {
   for (const id of missing) console.error(`   - ${id}`);
   process.exit(1);
 }
+// 第二类检查：事件绑定引用的**函数**必须存在。
+// 踩过的坑：批量替换时误删 saveSettings 整个函数，init() 执行到
+// `$("btnSave").onclick = saveSettings` 抛 ReferenceError，init 中断，
+// 结果账号列表、积分汇总全空白 —— 页面上按钮还在，看着像"数据丢了"。
+const defs = new Set();
+for (const m of js.matchAll(/^\s*(?:async\s+)?function\s+([A-Za-z0-9_$]+)\s*\(/gm)) defs.add(m[1]);
+for (const m of js.matchAll(/^\s*(?:const|let|var)\s+([A-Za-z0-9_$]+)\s*=\s*(?:async\s*)?(?:\(|function)/gm)) defs.add(m[1]);
+
+const wired = new Set();
+for (const m of js.matchAll(/\.on(?:click|change|input|submit)\s*=\s*([A-Za-z0-9_$]+)\s*;/g)) wired.add(m[1]);
+for (const m of js.matchAll(/addEventListener\(\s*["'][a-z]+["']\s*,\s*([A-Za-z0-9_$]+)\s*\)/g)) wired.add(m[1]);
+
+const LITERALS = new Set(["null", "undefined", "true", "false"]);
+const undef = [...wired].filter((n) => !LITERALS.has(n) && !defs.has(n)).sort();
+if (undef.length) {
+  console.error("✗ 事件绑定引用了未定义的函数（会让 init 抛错、面板整页空白）：");
+  for (const n of undef) console.error(`   - ${n}`);
+  process.exit(1);
+}
+
 console.log(`✅ id 引用全部存在（${refs.size} 个引用 / ${ids.size} 个元素）`);
+console.log(`✅ 事件绑定函数均已定义（${wired.size} 个绑定 / ${defs.size} 个定义）`);
