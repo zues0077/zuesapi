@@ -10,6 +10,14 @@
 *.sh text eol=lf
 docker/*.sh text eol=lf
 
+# FPK 的启动/安装脚本没有扩展名（cmd/main、cmd/install_callback…），
+# *.sh 规则盖不到它们 —— 在 Windows 上（core.autocrlf=true）重新 checkout 会被转成
+# CRLF，而 scripts/stage_fpk.sh 是直接 cp 工作区去打本地包的，于是打出来的 fpk 里
+# cmd/main 带 CRLF，装上后 /bin/bash^M 直接起不来。必须显式声明。
+fpk/*/cmd/* text eol=lf
+fpk/*/wizard/* text eol=lf
+fpk/*/config/* text eol=lf
+
 # Dockerfile 同理：CRLF 会让 RUN / COPY 指令带上 \r 而失败
 Dockerfile text eol=lf
 docker/Dockerfile text eol=lf
