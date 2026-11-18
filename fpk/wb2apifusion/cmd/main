@@ -62,6 +62,64 @@ log_msg() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> ${LOG_FILE}
 }
 
+# same_bin_pids：列出「可执行文件就是本应用二进制」的所有进程 pid（每行一个）。
+#
+# ⚠ 必须按 /proc/<pid>/exe 的 realpath 比对，**不能**按命令行字符串 pgrep -f "${BIN}"：
+#   ${TRIM_APPDEST} 有两种拼写都指向同一份文件 ——
+#     /var/apps/<app>/target   （手工/脚本调用时常见）
+#     /vol2/@appcenter/<app>   （应用中心拉起时常见，readlink -f 后与上面同一个目录）
+#   2026-11-19 事故就是这么来的：残留进程命令行写着 /var/apps/...，应用中心用
+#   /vol2/@appcenter/... 拼出的 ${BIN} 去 pgrep -f，匹配不到 → 不杀 → 新进程 bind
+#   7865 失败退出 1 → pid 文件被清 → 应用中心永远显示「启用」。
+#   按 exe realpath 比则两种拼写等价，且天然不会误杀“命令行里恰好含该路径”的 shell
+#   （pkill -f 会把自己的 SSH 会话一起杀掉，见手册 P-1525 第一节）。
+same_bin_pids() {
+    local target e p
+    target=$(readlink -f "$BIN" 2>/dev/null) || target=""
+    [ -n "$target" ] || return 0
+    for d in /proc/[0-9]*; do
+        p=${d#/proc/}
+        [ "$p" = "$$" ] && continue
+        e=$(readlink -f "$d/exe" 2>/dev/null) || continue
+        # 二进制被替换后旧进程的 exe 会带 " (deleted)" 后缀，此时 realpath 不等于
+        # 当前文件 → 不视为同二进制（下面按「先 TERM 再 KILL」照常清掉老版本）。
+        if [ "$e" = "$target" ]; then
+            printf '%s\n' "$p"
+        fi
+    done
+    return 0
+}
+
+# port_holder_pid：查监听某端口的进程 pid（尽力而为，查不到就返回空）。
+port_holder_pid() {
+    local port=${1#:}
+    local pid=""
+    if command -v ss >/dev/null 2>&1; then
+        pid=$(ss -ltnp 2>/dev/null | awk -v p=":${port}" '$4 ~ p"$"' \
+              | grep -o 'pid=[0-9]*' | head -n 1 | cut -d= -f2)
+    fi
+    if [ -z "$pid" ] && command -v fuser >/dev/null 2>&1; then
+        pid=$(fuser -n tcp "${port}" 2>/dev/null | tr -s ' ' '\n' | grep -E '^[0-9]+$' | head -n 1)
+    fi
+    printf '%s' "$pid"
+}
+
+# log_start_failure_reason：把子进程真正的 fatal 原因补进 info.log。
+#
+# 程序自己的 logger 把 `listen ... failed` 写进 app.log，**不会**写进 info.log，
+# 于是 info.log 只剩一句笼统的「启动失败：进程已退出」，排查时极易误判成
+# config.json 损坏（2026-11-19 实际发生过）。这里把 app.log 尾部的关键行抄过来。
+log_start_failure_reason() {
+    local reason
+    reason=$(tail -n 300 "${TRIM_PKGVAR}/app.log" 2>/dev/null \
+             | grep -a -E 'listen .* failed|fatal|panic' | tail -n 1)
+    if [ -n "$reason" ]; then
+        log_msg "真实原因：${reason}"
+    else
+        log_msg "未在 app.log 找到 listen/fatal 行，请查 ${TRIM_PKGVAR}/app.log 末尾"
+    fi
+}
+
 # json_escape：转义 \ 和 "，并吃掉换行。
 # 向导密码含引号时若不转义，生成的 config.json 直接非法，程序启动即崩。
 json_escape() {
@@ -190,10 +248,26 @@ EOF
 }
 
 start_process() {
-    if pgrep -f "${BIN}" > /dev/null 2>&1; then
-        log_msg "found existing process, killing..."
-        pkill -f "${BIN}"
-        sleep 1
+    # 先清掉同二进制的残留实例（含「应用中心不认识」的那些：手工 cmd/main start 起的、
+    # 旁路测试遗留的）。判定见 same_bin_pids 的注释 —— 按 exe realpath，不按命令行字符串。
+    old_pids=$(same_bin_pids)
+    if [ -n "$old_pids" ]; then
+        log_msg "发现同二进制进程：$(printf '%s' "$old_pids" | tr '\n' ' ')，发送 TERM"
+        # shellcheck disable=SC2086
+        kill -TERM $old_pids 2>/dev/null
+        i=0
+        while [ $i -lt 5 ]; do
+            sleep 1
+            [ -z "$(same_bin_pids)" ] && break
+            i=$((i + 1))
+        done
+        left=$(same_bin_pids)
+        if [ -n "$left" ]; then
+            log_msg "发送 TERM 后仍存活：$(printf '%s' "$left" | tr '\n' ' ')，发送 KILL"
+            # shellcheck disable=SC2086
+            kill -KILL $left 2>/dev/null
+            sleep 1
+        fi
     fi
 
     resolve_secret
@@ -223,7 +297,28 @@ start_process() {
     # 「运行中」，故障被完全吞掉（现象就是「点打开，几秒后自己退回启用按钮」却毫无提示）。
     sleep 2
     if ! check_process "$pid"; then
-        log_msg "启动失败：进程已退出（pid=${pid}）。请看 ${LOG_FILE} 末尾的 fatal 原因 —— 常见：config.json 非法、端口 $(effective_listen) 被占用、对外监听未设管理密码"
+        log_msg "启动失败：进程已退出（pid=${pid}）"
+        log_start_failure_reason
+
+        # 端口被**同二进制**进程占用 → 接管它，而不是让应用中心永远显示「停止」。
+        #
+        # 正常路径上方的 TERM/KILL 已经清干净，走到这里说明 kill 没成功（权限、
+        # 进程卡在 D 状态、或刚好在两步之间被别人拉起）。只要占用者确实是本应用
+        # 的二进制，把它登记进 PID_FILE 就是正确语义：服务在跑，界面该显示运行中。
+        # 占用者是**别家程序**时绝不接管，只报清楚是谁占了端口。
+        holder=$(port_holder_pid "$(effective_listen)")
+        if [ -n "$holder" ]; then
+            holder_exe=$(readlink -f "/proc/${holder}/exe" 2>/dev/null)
+            target_exe=$(readlink -f "$BIN" 2>/dev/null)
+            if [ -n "$holder_exe" ] && [ "$holder_exe" = "$target_exe" ]; then
+                printf "%s" "$holder" > ${PID_FILE}
+                log_msg "端口 $(effective_listen) 已被本应用进程占用（pid=${holder}），已接管：写入 ${PID_FILE}，视为运行中"
+                return 0
+            fi
+            log_msg "端口 $(effective_listen) 被其它程序占用：pid=${holder}（${holder_exe:-未知}）。请换端口或先停掉它"
+            return 1
+        fi
+        log_msg "启动失败：未查到端口占用者，常见原因 = config.json 非法 / 对外监听未设管理密码（见上方「真实原因」）"
         return 1
     fi
     log_msg "进程已启动 pid=${pid} listen=$(effective_listen)（config.json 优先）"
