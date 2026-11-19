@@ -58,7 +58,7 @@ import (
 // （cmd/workbuddy-api/rsrc_windows_amd64.syso，由 build/make_syso.py 从
 // icon.ico 生成）也带版本号，须重新生成 —— 见 build/ICON_README.md。
 // 否则文件属性里显示的还是旧版本，与面板显示不一致。
-const Version = "0.1.16"
+const Version = "0.1.17"
 
 const (
 	loginTimeout   = 5 * time.Minute
@@ -1987,7 +1987,7 @@ func (a *App) ServerRunning() bool {
 // SetCompat 保存模型名路由配置（default_channel / 封顶 tokens / 别名映射 / 多候选），
 // 并热更新外层兼容层的路由表：不同步的话新映射要重启才生效。
 func (a *App) SetCompat(defaultChannel string, maxTokensCap int, modelMap map[string]string,
-	customModels map[string][]string) error {
+	customModels map[string][]string, autoAliases map[string]config.AutoAliasSpec) error {
 	if modelMap == nil {
 		modelMap = map[string]string{}
 	}
@@ -2015,6 +2015,7 @@ func (a *App) SetCompat(defaultChannel string, maxTokensCap int, modelMap map[st
 	a.cfg.Compat.MaxTokensCap = maxTokensCap
 	a.cfg.Compat.ModelMap = modelMap
 	a.cfg.Compat.CustomModels = customModels
+	a.cfg.Compat.AutoAliases = autoAliases
 	err := config.Save(a.cfg, a.cfgPath)
 	a.mu.Unlock()
 	if err != nil {
@@ -2457,7 +2458,9 @@ type State struct {
 		// CustomModels 多候选虚拟模型名（alias → 候选 "channel/model" 阵列），
 		// 由面板「多候选自定义模型」勾选生成。
 		CustomModels map[string][]string `json:"custom_models"`
-		Channels     []string            `json:"channels"` // 可用渠道列表（供 UI 下拉）
+		// AutoAliases 哪些别名由后端自动优选管理（费率变化自动重算），供 UI 提示「这个由系统维护」。
+		AutoAliases map[string]config.AutoAliasSpec `json:"auto_aliases"`
+		Channels    []string                        `json:"channels"` // 可用渠道列表（供 UI 下拉）
 	} `json:"compat"`
 
 	// Proxies 单渠道上游代理（只读，保存走 POST /api/config/proxies）。
@@ -2523,6 +2526,10 @@ func (a *App) GetState() State {
 	st.Compat.CustomModels = a.cfg.Compat.CustomModels
 	if st.Compat.CustomModels == nil {
 		st.Compat.CustomModels = map[string][]string{}
+	}
+	st.Compat.AutoAliases = a.cfg.Compat.AutoAliases
+	if st.Compat.AutoAliases == nil {
+		st.Compat.AutoAliases = map[string]config.AutoAliasSpec{}
 	}
 	for k := range a.runtimes {
 		st.Compat.Channels = append(st.Compat.Channels, k.String())
@@ -3050,13 +3057,14 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 	})
 	mux.HandleFunc("POST /api/config/compat", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			DefaultChannel string              `json:"default_channel"`
-			MaxTokensCap   int                 `json:"max_tokens_cap"`
-			ModelMap       map[string]string   `json:"model_map"`
-			CustomModels   map[string][]string `json:"custom_models"`
+			DefaultChannel string                         `json:"default_channel"`
+			MaxTokensCap   int                            `json:"max_tokens_cap"`
+			ModelMap       map[string]string              `json:"model_map"`
+			CustomModels   map[string][]string            `json:"custom_models"`
+			AutoAliases    map[string]config.AutoAliasSpec `json:"auto_aliases"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
-		if err := a.SetCompat(req.DefaultChannel, req.MaxTokensCap, req.ModelMap, req.CustomModels); err != nil {
+		if err := a.SetCompat(req.DefaultChannel, req.MaxTokensCap, req.ModelMap, req.CustomModels, req.AutoAliases); err != nil {
 			apiError(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -3689,6 +3697,9 @@ func (a *App) RefreshPricing() {
 	a.pricingCache = allPricing
 	a.pricingMu.Unlock()
 	a.savePricingCache()
+	// 费率刚更新：让自动优选别名（deva-main/deva-free 这类）跟随最新费率重算候选。
+	// 放在这里而不是 ticker 里，是为了让面板手动刷新也立即生效；pricingBusy 保证串行。
+	a.recomputeAutoAliases()
 }
 
 // loadPricingCache 从文件加载定价缓存。

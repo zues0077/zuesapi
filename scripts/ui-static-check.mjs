@@ -250,10 +250,12 @@ const ROUTE_FEES = {
       ],
     },
     {
-      // 非对话模型：即使标了 supports_tools 也不能当主力
+      // 非对话模型：即使标了 supports_tools 也不能当主力；
+      // 且该渠道唯一账号 account_fault（2026-11-19 实机事故），整个渠道都要排除。
       channel: "workbuddyai", models: [
         { model: "computer_use_subagent", rate: 0.1, priced: true, free: false, exhausted: false, supports_tools: true },
         { model: "glm-5.2_advisor_doubao", rate: 0.1, priced: true, free: false, exhausted: false, supports_tools: true },
+        { model: "gpt-6-luna", rate: 0.07, priced: true, free: false, exhausted: false, supports_tools: true },
       ],
     },
   ],
@@ -261,8 +263,16 @@ const ROUTE_FEES = {
 const ROUTE_STATE = {
   compat: { channels: ["workbuddy", "qodercn", "raccoon", "workbuddyai"], model_map: {}, custom_models: {} },
   fees: ROUTE_FEES,
-  accounts: [],
+  accounts: [
+    { group: "workbuddy", credits: 1607, cooling: false, disabled: false, reason: "", until: "" },
+    { group: "workbuddyai", credits: 488, cooling: false, disabled: false, reason: "account_fault", until: "11-19 10:46" },
+    { group: "raccoon", credits: 9300, cooling: false, disabled: false, reason: "", until: "" },
+  ],
   version: "test",
+  custom_channels: [
+    { name: "deepseek", tag: "webapi", base_url: "http://127.0.0.1:8800/v1" },
+    { name: "mycode", tag: "code", base_url: "https://example.com/v1" },
+  ],
 };
 const rnodes = {};
 const rDoc = {
@@ -271,7 +281,9 @@ const rDoc = {
     classList: {
       _s: new Set(),
       add(c) { this._s.add(c); }, remove(c) { this._s.delete(c); }, contains(c) { return this._s.has(c); },
+      toggle(c) { if (this._s.has(c)) this._s.delete(c); else this._s.add(c); },
     },
+    parentNode: { appendChild: () => {} },
     // 真实节点也有 querySelectorAll（renderMapPresets 用它给插入按钮绑事件），stub 不能漏
     querySelectorAll: () => [],
     scrollTop: 0, scrollHeight: 0, clientHeight: 0,
@@ -287,7 +299,7 @@ const routeFetch = async (path, opts) => {
   return { ok: true, json: async () => ({}) };
 };
 const rPatched = raw.replace(/let state = null;/, "let state = " + JSON.stringify(ROUTE_STATE) + ";")
-  + "\n; globalThis.__R = { routePool, pickRouteModels, CLIENT_ENTRIES, applyClientPreset, probeRoute, rateLabel, renderMapPresets, getState: () => state };";
+  + "\n; globalThis.__R = { routePool, pickRouteModels, pickCheapCandidates, pickFreeCandidates, freeAliasOf, webapiChannels, applyCustomPreset, onRouteClientChange, hasThinkingModel, autoAliasesFrom, CLIENT_ENTRIES, applyClientPreset, probeRoute, rateLabel, renderMapPresets, getState: () => state };";
 new Function("document", "window", "localStorage", "fetch", "location", "navigator", rPatched)(
   rDoc, window, { getItem: () => null, setItem: () => {} },
   routeFetch, { search: "" }, { userAgent: "node" });
@@ -299,6 +311,12 @@ check("候选池排除「不支持工具调用」的渠道", !pool.some((r) => r
   `池内有 qodercn: ${pool.filter((r) => r.channel === "qodercn").length}`);
 check("候选池排除非对话模型（computer_use / advisor）",
   !pool.some((r) => /computer_use|advisor/.test(r.model)));
+check("候选池排除「账号全故障」的渠道（workbuddyai 实机 11128）",
+  !pool.some((r) => r.channel === "workbuddyai"),
+  `池内 workbuddyai ${pool.filter((r) => r.channel === "workbuddyai").length} 条`);
+check("主力不会落到账号全故障渠道的便宜模型（gpt-6-luna 0.07x）",
+  !pool.some((r) => r.model === "gpt-6-luna"),
+  `gpt-6-luna 在池内 ${pool.filter((r) => r.model === "gpt-6-luna").length} 条`);
 check("排序：免费且还有额度的排第一",
   pool[0].channel === "workbuddy" && pool[0].model === "hy4flash-free",
   `实际首位 ${pool[0]?.channel}/${pool[0]?.model}`);
@@ -367,6 +385,135 @@ const compat3 = routeCalls.find((c) => c.path === "/api/config/compat");
 check("与多候选同名时不写入 model_map", !compat3?.body?.model_map?.["claude-*"],
   JSON.stringify(compat3?.body?.model_map));
 check("跳过时给出说明（不静默丢弃）", /跳过/.test(rnodes["routeResult"]?.innerHTML || ""));
+
+// ---- 自定义客户端「自动优选生成」：跨平台便宜候选，不含强档 ----
+R.getState().compat.model_map = {};
+R.getState().compat.custom_models = {};
+const cheap = R.pickCheapCandidates();
+check("自动优选只挑付费 ≥0.05x（不把免费小模型当主力）",
+  cheap.length > 0 && cheap.every((r) => r.priced && !r.free && r.rate >= 0.05),
+  JSON.stringify(cheap.map((r) => `${r.channel}/${r.model}:${r.rate}`)));
+check("自动优选不含 6.67x 旗舰/强档（网关不会因任务难自动选贵）",
+  !cheap.some((r) => r.rate > 1.5),
+  JSON.stringify(cheap.map((r) => r.rate)));
+check("自动优选按费率升序", cheap.every((r, i) => i === 0 || cheap[i - 1].rate <= r.rate),
+  JSON.stringify(cheap.map((r) => r.rate)));
+check("自动优选尽量跨平台：首个候选取不同渠道最便宜的",
+  cheap[0].channel === "workbuddy" && cheap[0].model === "glm-5.3-flash",
+  `${cheap[0]?.channel}/${cheap[0]?.model}`);
+check("自动优选排除死渠道 workbuddyai 与全不支持工具的 qodercn",
+  !cheap.some((r) => r.channel === "workbuddyai" || r.channel === "qodercn"));
+
+// webapi（本地小服务）不参与优选：渠道名与 tag=webapi 的自定义渠道都要排除
+const wc = R.webapiChannels();
+check("webapi 排除集含 customopenai 与 tag=webapi 的自定义渠道",
+  wc.has("customopenai") && wc.has("deepseek") && !wc.has("mycode"),
+  JSON.stringify([...wc]));
+check("自动优选候选池不含任何 webapi 渠道", !cheap.some((r) => wc.has(r.channel)));
+
+// 免费省钱组：只挑 free 且没被限流的，跨平台
+const freeC = R.pickFreeCandidates();
+check("免费组只挑免费且未限流的候选",
+  freeC.length > 0 && freeC.every((r) => r.free && !r.exhausted),
+  JSON.stringify(freeC.map((r) => `${r.channel}/${r.model}:${r.rate}`)));
+check("免费组排除额度已用尽的 sn-sensenova-6-8-flash",
+  !freeC.some((r) => r.model === "sn-sensenova-6-8-flash"));
+check("免费别名派生：deva-main → deva-free",
+  R.freeAliasOf("deva-main") === "deva-free" && R.freeAliasOf("deva") === "deva-free");
+
+// 一键生成：写入 custom_models 并立即保存，名字可自定义
+rDoc.getElementById("routeCustomName").value = "deva-main";
+rDoc.getElementById("multiMapText").value = "";
+routeCalls.length = 0;
+await R.applyCustomPreset();
+const compatC = routeCalls.find((c) => c.path === "/api/config/compat");
+check("自动优选提交到 /api/config/compat", !!compatC);
+check("自动优选写入付费别名 custom_models[deva-main]", Array.isArray(compatC?.body?.custom_models?.["deva-main"]),
+  JSON.stringify(compatC?.body?.custom_models));
+check("自动优选写入免费别名 custom_models[deva-free]", Array.isArray(compatC?.body?.custom_models?.["deva-free"]),
+  JSON.stringify(compatC?.body?.custom_models));
+check("免费别名里全是免费模型（对照费率清单）",
+  (compatC?.body?.custom_models?.["deva-free"] || []).every((c) => {
+    const m = c.split("/")[1];
+    return ROUTE_FEES.channels.some((ch) => ch.models.some((x) => x.model === m && x.free));
+  }),
+  JSON.stringify(compatC?.body?.custom_models?.["deva-free"]));
+check("自动优选写入的候选都是 渠道/模型 形式",
+  Object.values(compatC?.body?.custom_models || {}).flat().every((c) => c.includes("/") && !c.includes(" ")),
+  JSON.stringify(compatC?.body?.custom_models));
+check("自动优选写入的模型名来自实时清单（不含过期 kimi-k2.7）",
+  !JSON.stringify(compatC?.body?.custom_models || {}).includes("kimi-k2.7"));
+check("自动优选把兜底切成 auto", compatC?.body?.default_channel === "auto");
+check("自动优选结果区给出「已生效」与两个名字说明",
+  /已生效/.test(rnodes["routeResult"]?.innerHTML || "") &&
+  /deva-main/.test(rnodes["routeResult"]?.innerHTML || "") &&
+  /deva-free/.test(rnodes["routeResult"]?.innerHTML || ""));
+check("自动优选同步回显到多候选编辑器（两个别名）",
+  /deva-main = /.test(rnodes["multiMapText"]?.value || "") && /deva-free = /.test(rnodes["multiMapText"]?.value || ""),
+  rnodes["multiMapText"]?.value);
+
+// 自动别名标记：写入 auto_aliases，后端据此随费率自动重算（C 方案）
+check("自动优选写入 auto_aliases（付费 + 免费两组）",
+  compatC?.body?.auto_aliases?.["deva-main"]?.group === "paid" &&
+  compatC?.body?.auto_aliases?.["deva-free"]?.group === "free",
+  JSON.stringify(compatC?.body?.auto_aliases));
+check("auto_aliases.generated 记录本次系统挑的候选（供重算时保留手工项）",
+  Array.isArray(compatC?.body?.auto_aliases?.["deva-main"]?.generated) &&
+  compatC.body.auto_aliases["deva-main"].generated.length > 0,
+  JSON.stringify(compatC?.body?.auto_aliases?.["deva-main"]?.generated));
+check("auto_aliasesFrom 保留已有其它别名标记（不误删）",
+  (() => {
+    R.getState().compat.auto_aliases = { "other-alias": { group: "free", generated: ["x/y"] } };
+    const out = R.autoAliasesFrom("deva-main", cheap, freeC);
+    return out["other-alias"]?.group === "free" && out["deva-main"]?.group === "paid";
+  })());
+
+// 自己加模型的指路提示（用户问「deva-main 里的模型能否自己加」）
+check("生成结果给出「自己加模型」指路（到多候选管理里补）",
+  /自己加模型/.test(rnodes["routeResult"]?.innerHTML || "") &&
+  /一个名字挂多个模型/.test(rnodes["routeResult"]?.innerHTML || ""));
+check("生成结果说明两个名字由系统维护（费率变化自动重挑）",
+  /系统维护/.test(rnodes["routeResult"]?.innerHTML || ""));
+
+// max_tokens 精准提示：只在候选里真有 thinking 模型时提示
+check("hasThinkingModel 能识别会思考的候选",
+  (() => {
+    const rows = [{ channel: "workbuddy", model: "think-model" }, { channel: "x", model: "plain" }];
+    const withState = { ...ROUTE_STATE, fees: {
+      channels: [{ channel: "workbuddy", models: [{ model: "think-model", supports_reasoning: true }] }],
+    } };
+    // 直接改共享 state 的 fees 来测（测完恢复）
+    const saved = R.getState().fees;
+    R.getState().fees = withState.fees;
+    const yes = R.hasThinkingModel(rows);
+    R.getState().fees = saved;
+    return yes === true;
+  })(), "含 thinking 模型应返回 true");
+check("hasThinkingModel 对纯普通模型返回 false（不误弹提示）",
+  (() => {
+    const saved = R.getState().fees;
+    R.getState().fees = { channels: [{ channel: "x", models: [{ model: "plain", supports_reasoning: false }] }] };
+    const no = R.hasThinkingModel([{ channel: "x", model: "plain" }]);
+    R.getState().fees = saved;
+    return no === false;
+  })());
+
+// Deva 独立选项：选中即预填 deva-main 并展开自定义行
+R.onRouteClientChange.call(null);
+rnodes["selRouteClient"].value = "deva";
+R.onRouteClientChange();
+check("选 Deva 自动预填 deva-main",
+  rnodes["routeCustomName"].value === "deva-main", rnodes["routeCustomName"].value);
+check("选 Deva 展开自定义行（routeCustomRow 可见）",
+  rnodes["routeCustomRow"].classList.contains("hidden") === false);
+
+// 重名保护：与已有 model_map 同名时拒绝
+R.getState().compat.model_map = { "deva-main": "workbuddy/glm-5.3" };
+routeCalls.length = 0;
+await R.applyCustomPreset();
+check("自动优选遇到重名不提交（后端不允许两边共用名字）", routeCalls.length === 0,
+  `提交次数 ${routeCalls.length}`);
+check("重名时给出换名提示", /换/.test(rnodes["routeResult"]?.innerHTML || ""));
 
 // 快速别名按渠道生成、互不冲突
 R.renderMapPresets(["workbuddy", "raccoon"]);

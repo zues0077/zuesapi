@@ -127,6 +127,16 @@ type CustomChannel struct {
 	MaxConcurrency int `json:"max_concurrency,omitempty"`
 }
 
+// AutoAliasSpec 标记一个 custom_models 别名由后端自动优选管理（费率变化自动重算）。
+// 只在用户通过面板「自动优选生成」时才写入；没有标记的别名完全不受重算影响。
+type AutoAliasSpec struct {
+	// Group 分组："paid"（付费主力）或 "free"（全免费省钱）。其它值视为失效。
+	Group string `json:"group"`
+	// Generated 上次由系统自动生成的候选（channel/model）。
+	// 重算时只替换这部分；用户后来手工追加的候选（不在此列）保留拼在后面。
+	Generated []string `json:"generated"`
+}
+
 // Config 顶层配置。
 type Config struct {
 	Listen Listen `json:"listen"`
@@ -251,6 +261,10 @@ type Config struct {
 		// 用来描述「一个虚拟模型名可以走哪些模型」：请求先匹配界面上
 		// 用户勾选的候选列表（按免费/低费率排好序），哪个额度用尽就切下一个。
 		CustomModels map[string][]string `json:"custom_models"`
+		// AutoAliases 自动优选别名标记：alias → {group, generated}。
+		// 仅这些别名会随费率刷新自动重算；generated 之外的候选项视为用户手工追加，重算时保留。
+		// 缺省/nil = 没有自动别名，行为与旧版本完全一致（零回归）。
+		AutoAliases map[string]AutoAliasSpec `json:"auto_aliases,omitempty"`
 		// MaxTokensCap 转发上游前对 max_tokens 封顶（0 = 不限制）。
 		// Anthropic 客户端常发 64000，而多数上游上限更低，导致直接 400。
 		MaxTokensCap int `json:"max_tokens_cap"`
@@ -617,6 +631,20 @@ func (c *Config) normalize() error {
 	c.ExpiringThresholdDur = time.Duration(c.Schedule.ExpiringThresholdHours) * time.Hour
 	if c.Compat.MaxTokensCap < 0 {
 		c.Compat.MaxTokensCap = 0 // 负数视为「不限制」，避免误用导致 max_tokens 被置 0
+	}
+	// 自动优选别名标记：只保留 group 合法（paid/free）且名字与 custom_models 对得上的项。
+	// 手写配置塞的垃圾在这里清掉，避免重算时误伤。
+	for name, spec := range c.Compat.AutoAliases {
+		if spec.Group != "paid" && spec.Group != "free" {
+			delete(c.Compat.AutoAliases, name)
+			continue
+		}
+		if _, ok := c.Compat.CustomModels[name]; !ok {
+			delete(c.Compat.AutoAliases, name)
+		}
+	}
+	if len(c.Compat.AutoAliases) == 0 {
+		c.Compat.AutoAliases = nil
 	}
 	if c.Listen.Port <= 0 {
 		c.Listen.Port = 7863

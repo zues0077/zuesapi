@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 
 	"workbuddy-api/internal/server"
@@ -106,8 +107,11 @@ func (g *Gateway) call(parent context.Context, path string, body []byte, apiKey 
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 	if len(candidates) > 0 {
-		// 候选阵列仅作为层间控制标记，不会进入内层尽量给你的 body 或上游的 body。
-		req.Header.Set("X-WorkBuddy-Candidates", candidates[0])
+		// 候选阵列仅作为层间控制标记，不会进入内层尽力给你的 body 或上游的 body。
+		// 内层 handler.chatCompletions 按 "|" 拆分，要求首段是 alias、其后是候选实体，
+		// 至少两段才启用跨渠道切号（见 server/handler.go candidateHeader 处理）。
+		// 必须拼接完整阵列——只传 candidates[0] 会让内层判定为普通模式，切号失效。
+		req.Header.Set("X-WorkBuddy-Candidates", strings.Join(candidates, "|"))
 	}
 
 	go func() {

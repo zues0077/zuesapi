@@ -3014,15 +3014,56 @@ const ROUTE_BLOCKLIST = [
   /(^|[_-])tts([_-]|$)/i, /whisper/i, /(^|[_-])image([_-]|$)/i, /(^|[_-])video([_-]|$)/i, /(^|[_-])ocr([_-]|$)/i,
 ];
 
+// deadChannels 找出「账号全挂」的渠道：模型再便宜也配不上去，必须从候选池剔掉。
+//
+// 2026-11-19 实机教训：一键配按价格选中 workbuddyai/gpt-6-luna(0.07x)，
+// 但那个渠道只剩 1 个账号且 reason=account_fault，Claude Code 一连就 11128/账号故障。
+// 判据只认「该渠道有账号记录」且「每一个都不可用」；没账号记录的渠道不猜，
+// 避免把刚接好还没同步账号状态的渠道误杀。
+function deadChannels() {
+  const byGroup = new Map();
+  for (const a of (state?.accounts || [])) {
+    const g = a && a.group;
+    if (!g) continue;
+    if (!byGroup.has(g)) byGroup.set(g, []);
+    byGroup.get(g).push(a);
+  }
+  const dead = new Set();
+  for (const [g, list] of byGroup) {
+    if (!list.length) continue;
+    const allBad = list.every((a) => a.disabled || a.cooling ||
+      !!(a.reason && String(a.reason).trim()) || !!(a.until && String(a.until).trim()));
+    if (allBad) dead.add(g);
+  }
+  return dead;
+}
+
+// webapiChannels 收集「强度不同、只适合低等级任务」的 webapi 渠道，优选时必须排除。
+//
+// 2026-11-19 用户明确：webapi（tag=webapi 的自定义渠道，deepseek/智谱/kimi/spark，
+// 都走本地 8800/8082 小服务）强度跟正规渠道不是一个量级，不能进自动优选当主力。
+// 网关里所有自定义渠道共用 customopenai 这个渠道名，所以它也一起排除。
+function webapiChannels() {
+  const out = new Set(["customopenai"]);
+  for (const c of (state?.custom_channels || [])) {
+    if (c && /webapi/i.test(String(c.tag || "")) && c.name) out.add(c.name);
+  }
+  return out;
+}
+
 // routePool 收集「客户端接入可用」的候选，并按「能不能马上用 → 免不免费 → 便宜不便宜」排序。
 //
 // 筛选口径（每条都有实际原因，不是拍脑袋）：
 //   - supports_tools 必须为真：Claude Code / Codex 全靠 tool use，不支持工具的模型接上去第一步就报错；
 //   - 排除非对话模型（见 ROUTE_BLOCKLIST）；
+//   - 排除账号全故障的渠道（见 deadChannels）：价格再低也连不上；
 //   - 当日已被限流的免费模型排在最后：否则配完很快就报「额度用尽」，用户会以为配置没生效。
 function routePool() {
   const rows = [];
+  const dead = deadChannels();
+  const webapi = webapiChannels();
   for (const ch of (state.fees?.channels || [])) {
+    if (dead.has(ch.channel) || webapi.has(ch.channel)) continue;
     for (const m of (ch.models || [])) {
       const name = String(m.model || "");
       if (!name || !m.supports_tools) continue;
@@ -3034,6 +3075,7 @@ function routePool() {
         priced: !!m.priced,
         free: !!m.free,
         exhausted: !!m.exhausted,
+        reasoning: !!m.supports_reasoning,
         ctx: m.context_window || 0,
       });
     }
@@ -3200,6 +3242,192 @@ async function applyClientPreset(kind) {
       : `只影响 ${esc(cfg.label)} 这类客户端；你直接写 <code>渠道/模型</code> 的请求不受影响。想换模型就改右边那张表里的名字。`);
 }
 
+// 自动优选：生成「付费主力」和「全免费省钱」两个别名，用户在客户端里按需要填其中一个。
+// 两组口径都基于 routePool（已排除账号全挂的渠道、webapi、非对话模型、不支持工具的模型）。
+// 不挑强档：多候选是「按费率顺序兜底」，网关不会因任务难自动选贵的，
+// 塞进去也永远排最后用不上，反而让人误以为难任务会自动走强模型。
+const ROUTE_CUSTOM_COUNT = 4;
+
+// freeAliasOf 从付费别名派生免费别名：deva-main → deva-free，deva → deva-free。
+function freeAliasOf(name) {
+  return /-main$/i.test(name) ? name.replace(/-main$/i, "-free") : name + "-free";
+}
+
+// hasThinkingModel 判断一组候选里是否混了「会先思考再回答」的模型。
+// 这类模型如果客户端把 max_tokens 给到 32/64，token 会被思考过程吃光，正文返回空，
+// 用户会误以为「模型坏了」。所以只在这种组里点名提示把 max_tokens 调到 ≥256。
+function hasThinkingModel(rows) {
+  const byKey = new Map();
+  for (const ch of (state.fees?.channels || [])) {
+    for (const m of (ch.models || [])) byKey.set(`${ch.channel}/${m.model}`, !!m.supports_reasoning);
+  }
+  return rows.some((r) => byKey.get(`${r.channel}/${r.model}`));
+}
+
+// autoAliasesFrom 生成写回后端的自动别名标记：告诉后端这几个名字的候选由它随费率重算，
+// generated 记下这次系统挑的项——重算时只换这些，用户后来手工加的会保留。
+function autoAliasesFrom(name, paid, free) {
+  const next = { ...(state.compat?.auto_aliases || {}) };
+  const cm = (rows) => rows.map((r) => `${r.channel}/${r.model}`);
+  if (paid.length) next[name] = { group: "paid", generated: cm(paid) };
+  if (free.length) next[freeAliasOf(name)] = { group: "free", generated: cm(free) };
+  return next;
+}
+
+// pickCandidatesBy 按给定口径挑候选：尽量跨不同渠道（同一个平台挂了全挂，跨平台才互为备用），
+// 每个渠道先取一个最便宜的，渠道不够数再回头补第二个，最多 ROUTE_CUSTOM_COUNT 个。
+function pickCandidatesBy(filter) {
+  const pool = routePool().filter(filter);
+  if (!pool.length) return [];
+  const out = [];
+  const usedCh = new Set();
+  for (const r of pool) {
+    if (usedCh.has(r.channel)) continue;
+    usedCh.add(r.channel);
+    out.push(r);
+    if (out.length >= ROUTE_CUSTOM_COUNT) break;
+  }
+  if (out.length < ROUTE_CUSTOM_COUNT) {
+    for (const r of pool) {
+      if (out.some((x) => x.channel === r.channel && x.model === r.model)) continue;
+      out.push(r);
+      if (out.length >= ROUTE_CUSTOM_COUNT) break;
+    }
+  }
+  return out;
+}
+
+// 付费主力组：≥0.05x 的付费模型——稳定、限流少，当默认主力。
+function pickCheapCandidates() {
+  return pickCandidatesBy((r) => r.priced && !r.free && r.rate >= ROUTE_MAIN_MIN_RATE);
+}
+// 全免费省钱组：免费且当日还有额度的（exhausted 的不进，否则配完立刻报额度不足）。
+function pickFreeCandidates() {
+  return pickCandidatesBy((r) => r.free && !r.exhausted);
+}
+
+// applyCustomPreset 一键给「自定义客户端」生成多候选别名并立即保存生效。
+// 名字不与已有 model_map / custom_models 重名（后端不允许两边共用同一名字）。
+async function applyCustomPreset() {
+  const box = $("routeResult");
+  box.classList.remove("hidden");
+  const name = ($("routeCustomName")?.value || "").trim();
+  if (!name) {
+    box.innerHTML = `<span class="bad">先填一个模型名</span>（比如 deva-main），Deva 里就填这个名字。`;
+    return;
+  }
+  const paid = pickCheapCandidates();
+  const free = pickFreeCandidates();
+  if (!paid.length && !free.length) {
+    box.innerHTML = `<span class="bad">现在挑不出能用的模型</span>：先去「费率」页点一次刷新，再回来试。`;
+    return;
+  }
+  const freeName = freeAliasOf(name);
+
+  // 重名检查：model_map 与 custom_models 都不能有同名键（后端不允许两边共用名字）。
+  const modelMap = currentModelMap();
+  let multiMap = state.compat?.custom_models || {};
+  const multiRaw = $("multiMapText")?.value || "";
+  if (!$("multiMapEditor").classList.contains("hidden") && multiRaw.trim()) {
+    const [parsed] = parseMultiMapText(multiRaw);
+    if (parsed) multiMap = parsed;
+  }
+  const clashes = [];
+  if (modelMap[name] || multiMap[name]) clashes.push(name);
+  if (free.length && (modelMap[freeName] || multiMap[freeName])) clashes.push(freeName);
+  if (clashes.length) {
+    box.innerHTML = `<span class="bad">名字「${clashes.map(esc).join("」「")}」已经用过了</span>，换个名字再生成（比如 deva-main-2）。`;
+    return;
+  }
+
+  const nextMulti = { ...multiMap };
+  if (paid.length) nextMulti[name] = paid.map((r) => `${r.channel}/${r.model}`);
+  if (free.length) nextMulti[freeName] = free.map((r) => `${r.channel}/${r.model}`);
+  const nextAuto = autoAliasesFrom(name, paid, free);
+  const maxTokensCap = parseInt($("inMaxTok").value, 10) || 0;
+  try {
+    await api("/api/config/compat", {
+      default_channel: "auto",
+      max_tokens_cap: maxTokensCap,
+      model_map: modelMap,
+      custom_models: nextMulti,
+      auto_aliases: nextAuto,
+    });
+  } catch (e) {
+    box.innerHTML = `<span class="bad">保存失败</span>：${esc(e.message)}`;
+    return;
+  }
+
+  // 同步本地状态与两处编辑器的显示，避免「看起来没保存」。
+  state.compat = state.compat || {};
+  state.compat.custom_models = nextMulti;
+  state.compat.auto_aliases = nextAuto;
+  state.compat.default_channel = "auto";
+  $("selCh").value = "auto";
+  const lines = Object.entries(nextMulti).map(([k, v]) => `${k} = ${v.join(",")}`);
+  $("multiMapText").value = lines.join("\n");
+  if ($("multiSummary")) $("multiSummary").textContent = lines.join("\u00A0 \u00A0");
+
+  const fmt = (rows) => rows.map((r) => `<code>${esc(r.channel)}/${esc(r.model)}</code>（${rateLabel(r)}）`).join(" → ");
+  let html = `<span class="ok">✅ 已生效，不用重启</span>：生成了 <b>两个名字</b>，Deva 里按需要填其中一个：<br>`;
+  if (paid.length) {
+    html += `· <code>${esc(name)}</code>（<b>付费主力</b>，稳定少限流）：${fmt(paid)}<br>`;
+  }
+  if (free.length) {
+    html += `· <code>${esc(freeName)}</code>（<b>全免费省钱</b>）：${fmt(free)}<br>`;
+  }
+  html += `<span class="warn">说明</span>：都是低成本档，按费率顺序兜底，某平台挂了自动换下一个；` +
+    `网关不会因任务难自动挑贵的。想省钱就用带 -free 那个，想稳就用付费那个。<br>` +
+    `<span class="ok">这两个名字由系统维护</span>：上游费率/模型变了会自动重挑，你不用回来重配。` +
+    `想自己加模型，到下面「一个名字挂多个模型 → 管理」里，在该名字后面补 <code>渠道/模型</code>，` +
+    `系统重算时会保留你加的。`;
+  // 只有候选里真混了「会思考」的模型才提示 max_tokens——避免每次都弹出一句无关的提醒。
+  if (hasThinkingModel(paid) || hasThinkingModel(free)) {
+    const which = [
+      hasThinkingModel(paid) ? `<code>${esc(name)}</code>` : "",
+      hasThinkingModel(free) ? `<code>${esc(freeName)}</code>` : "",
+    ].filter(Boolean).join("、");
+    html += `<br><span class="warn">注意</span>：${which} 里有无「先思考再回答」的模型，` +
+      `Deva 里请把 <b>max_tokens 调到 256 以上</b>。给 32/64 会被思考吃光、正文返回空，` +
+      `看起来像模型坏了。`;
+  }
+  box.innerHTML = html;
+}
+
+// onRouteClientChange 下拉切换：Claude/Codex 保持原来的「点一下配好」，
+// 自定义客户端则展开填名字 + 自动优选那一行。
+function onRouteClientChange() {
+  const v = $("selRouteClient")?.value || "";
+  const row = $("routeCustomRow");
+  const hint = $("routePickHint");
+  const box = $("routeResult");
+  if (box) { box.classList.add("hidden"); box.innerHTML = ""; }
+  const isCustom = (v === "custom" || v === "deva");
+  if (row) row.classList.toggle("hidden", !isCustom);
+  // 选 Deva 直接把名字填好，用户点一下按钮就行，不用自己想名字。
+  if (v === "deva" && $("routeCustomName")) $("routeCustomName").value = "deva-main";
+  if (hint) {
+    if (isCustom) hint.textContent = v === "deva" ? "名字填好了，点「自动优选生成」就行" : "填个名字，点「自动优选生成」就行";
+    else if (v) hint.textContent = "选好了点下面这个按钮：";
+    else hint.textContent = "选好就自动配，立即生效，不用再按保存";
+  }
+  // Claude / Codex：选中即显示一个「点我一键配好」按钮（沿用原 applyClientPreset）。
+  let btn = $("btnRouteApply");
+  if (v === "claude" || v === "codex") {
+    if (!btn) {
+      btn = document.createElement("button");
+      btn.className = "btn small";
+      btn.id = "btnRouteApply";
+      $("selRouteClient").parentNode.appendChild(btn);
+    }
+    btn.textContent = `点我一键配好（${v === "claude" ? "Claude Code" : "Codex"}）`;
+    btn.onclick = () => applyClientPreset(v);
+    btn.classList.remove("hidden");
+  } else if (btn) {
+    btn.classList.add("hidden");
+  }
+}
+
 // syncRouteGuide 重置引导区（每次打开设置都从干净状态开始，避免上次的结论误导）。
 // 模型清单还没拉到时顺手补拉一次再重画按钮——首屏设置可能早于 /api/fees 返回。
 function syncRouteGuide() {
@@ -3212,7 +3440,12 @@ function syncRouteGuide() {
 
   const hint = $("routePickHint");
   const n = routePool().length;
-  if (hint && n) hint.textContent = `两个都用就两个都点一次 · 点了立即生效（现在有 ${n} 个模型可挂）`;
+  // 下拉回到「请选择」，收起自定义行，隐藏一键按钮。
+  if ($("selRouteClient")) $("selRouteClient").value = "";
+  if ($("routeCustomRow")) $("routeCustomRow").classList.add("hidden");
+  const applyBtn = $("btnRouteApply");
+  if (applyBtn) applyBtn.classList.add("hidden");
+  if (hint) hint.textContent = n ? `选好就自动配，立即生效（现在有 ${n} 个模型可挂）` : "选好就自动配，立即生效，不用再按保存";
   if (n) return;
   loadFees().then(() => {
     if ($("settingsOverlay")?.classList.contains("hidden")) return;
@@ -3220,7 +3453,7 @@ function syncRouteGuide() {
     renderMapPresets(chs);
     renderAliasForm(chs);
     const m = routePool().length;
-    if (hint && m) hint.textContent = `两个都用就两个都点一次 · 点了立即生效（现在有 ${m} 个模型可挂）`;
+    if (hint && m) hint.textContent = `选好就自动配，立即生效（现在有 ${m} 个模型可挂）`;
   }).catch(() => { /* 拉不到就保持「去费率页刷新」的提示 */ });
 }
 
@@ -3544,9 +3777,10 @@ function bind() {
   $("aliasChannel").onchange = () => renderAliasForm(state.compat?.channels || []);
   $("btnCompatMulti").onclick = toggleMultiMapEditor;
   $("btnAddMulti").onclick = addMultiAliasFromForm;
-  // 模型路由引导：① 点客户端名一键配好，② 输入模型名即时验算
-  $("btnRouteClaude").onclick = () => applyClientPreset("claude");
-  $("btnRouteCodex").onclick = () => applyClientPreset("codex");
+  // 模型路由引导：① 下拉选客户端（Claude/Codex 一键配好；自定义客户端自动优选），② 输入模型名即时验算
+  $("selRouteClient").onchange = onRouteClientChange;
+  $("btnRouteCustom").onclick = applyCustomPreset;
+  $("routeCustomName").onkeydown = (e) => { if (e.key === "Enter") applyCustomPreset(); };
   $("routeProbe").oninput = renderRouteProbe;
   // 自定义渠道：入口在账号管理页（不是设置里）。添加/删除都在独立弹层里完成。
   $("btnAddCustomChannelEntry").onclick = openCustomChannelModal;

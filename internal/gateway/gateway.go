@@ -128,14 +128,18 @@ func (g *Gateway) key() string {
 	return g.apiKey
 }
 
-// Routes 在 mux 上注册三接口路由 + 可选的 SystemOne 端点。
+// Routes 在 mux 上注册各接口路由 + 可选的 SystemOne 端点。
 //
-// 说明：仅注册内层没有的路径。POST /v1/chat/completions 与 GET /v1/models 由内层直接服务，
-// 无需本层介入，这样旧客户端的调用栈完全不变。
+// /v1/chat/completions 也在此注册（同构透传，见 chat.go）：目的不是改协议，
+// 而是让 OpenAI Chat 客户端也能用 model_map / custom_models 多候选别名——
+// 内层 server.Handler 不认别名，裸别名直接打过去会报 "must use explicit prefix"。
+// 注册后它仍走同一内层 chatCompletions（账号池/粘性/切号全保留），只是多了
+// 「模型名解析 + 候选头注入」这一步；普通模型的请求体与响应体原样透传，行为不变。
 func (g *Gateway) Routes(mux *http.ServeMux) {
 	if g == nil {
 		return
 	}
+	mux.HandleFunc("POST /v1/chat/completions", g.withAuth(g.handleChatCompletions))
 	mux.HandleFunc("POST /v1/responses", g.withAuth(g.handleResponses))
 	mux.HandleFunc("POST /v1/messages", g.withAuth(g.handleAnthropicMessages))
 	mux.HandleFunc("POST /v1/messages/count_tokens", g.withAuth(g.handleCountTokens))
@@ -170,13 +174,33 @@ func (g *Gateway) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// candidatesFromBody 当 model 为「多候选虚拟别名」时，返回候选阵列（按开源/低费率排序）；
+// candidatesFromBody 当 model 为「多候选虚拟别名」时，返回候选阵列；
 // 不是 alias 时返回 nil（普通路由模型，内层不做切号）。
+//
+// 返回值形如 [alias, cand1, cand2, ...]：首段必须是 alias——内层
+// server.Handler.chatCompletions 按 "|" 拆分请求头，丢掉首段后把其余当候选实体，
+// 至少两段才启用跨渠道切号（见 handler.go candidateHeader 处理）。只传候选实体
+// 会让内层判定为普通模式，切号永远不生效。
+//
+// 过滤口径与 Router.Resolve 的 custom_models 分支一致：剔除未接入渠道的候选，
+// 否则内层 runtimeForModel 会在该候选上报 invalid_model 并中断整个轮换。
 func (g *Gateway) candidatesFromBody(model string) []string {
 	var cands []string
 	g.withRouter(func(rt *Router) {
-		if rt.isCustomAlias(model) {
-			cands = rt.CustomModels[model]
+		if !rt.isCustomAlias(model) {
+			return
+		}
+		for _, cand := range rt.CustomModels[model] {
+			if _, err := rt.resolveMapped(model, cand); err == nil {
+				cands = append(cands, cand)
+			} else {
+				log.Printf("candidatesFromBody[%q] 排除 %q: %v", model, cand, err)
+			}
+		}
+		if len(cands) == 0 {
+			cands = nil
+		} else {
+			cands = append([]string{model}, cands...) // 首段 alias，内层据此进入候选模式
 		}
 	})
 	return cands

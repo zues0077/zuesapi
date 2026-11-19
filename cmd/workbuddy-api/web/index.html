@@ -428,11 +428,30 @@
         </div>
 
         <div class="route-guide">
-          <div class="route-guide-q">① 你在用什么客户端？点一下，自动帮你配好</div>
+          <div class="route-guide-q">① 你在用什么客户端？选一下，自动帮你配好</div>
           <div class="route-guide-btns">
-            <span class="btn small" id="btnRouteClaude">我用 Claude Code</span>
-            <span class="btn small" id="btnRouteCodex">我用 Codex</span>
-            <span class="hint" id="routePickHint">两个都用就两个都点一次 · 点了立即生效，不用再按保存</span>
+            <select id="selRouteClient" class="select" style="max-width:260px">
+              <option value="">请选择客户端…</option>
+              <option value="claude">Claude Code</option>
+              <option value="codex">Codex</option>
+              <option value="deva">Deva</option>
+              <option value="custom">其他客户端（Cherry Studio 等，自己填模型名）</option>
+            </select>
+            <span class="hint" id="routePickHint">选好就自动配，立即生效，不用再按保存</span>
+          </div>
+          <!-- 选「其他客户端」时展开：填一个自定义名字，点按钮自动优选一组便宜模型挂上去 -->
+          <div id="routeCustomRow" class="route-custom hidden">
+            <div class="hint" style="margin:8px 0 6px">
+              这类客户端的模型名是自己在软件里填的。填一个名字，点按钮，系统会自动生成<b>两个名字</b>：<br>
+              · <b>付费主力</b>（就是填的这个名，如 deva-main）：挑当前最便宜、能马上用、跨不同平台的付费模型；<br>
+              · <b>全免费省钱</b>（自动加 -free，如 deva-free）：挑还能用的免费模型。<br>
+              每组里哪个平台额度用完或出错，自动换下一个，你不用管。Deva 里想稳就填付费那个，想省钱就填 -free 那个。
+              webapi 那些本地小服务强度不够，不会进来。
+            </div>
+            <div class="row">
+              <input id="routeCustomName" class="input" style="max-width:220px" spellcheck="false" value="deva-main" placeholder="自定义模型名，如 deva-main">
+              <button class="btn small" id="btnRouteCustom">自动优选生成</button>
+            </div>
           </div>
           <div id="routeResult" class="route-result hidden"></div>
 
