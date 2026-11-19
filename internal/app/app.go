@@ -175,6 +175,8 @@ func New(opts Options) (*App, error) {
 	a.pricingHealth = make(map[provider.Kind]provider.ChannelHealth)
 	a.loginStateFP = filepath.Join(filepath.Dir(opts.Config.StateFile), "login-state.json")
 	a.pricingFP = filepath.Join(filepath.Dir(opts.Config.StateFile), "pricing-cache.json")
+	// 面板会话落盘：与 ledger 同在 data 目录，进程重启后自动恢复登录态。
+	a.auth.bind(filepath.Join(filepath.Dir(opts.Config.StateFile), sessionFile))
 
 	// 用量/积分双流水（data/ledger/）：优先复用 main 装配的实例
 	if opts.Ledger != nil {
@@ -3278,6 +3280,9 @@ func (a *App) guardMux(inner http.Handler) http.Handler {
 				writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "未登录或会话已过期", "need_login": true})
 				return
 			}
+			// 滑动续期：浏览器侧的过期时间跟着往后推，只要还在用就一直不用重登。
+			// 服务端 exp 已由 valid() 续过，这里只是重下同一个 token（不换凭证）。
+			setSessionCookie(w, r, c.Value)
 		}
 		inner.ServeHTTP(w, r)
 	}))
@@ -3294,6 +3299,9 @@ func setSessionCookie(w http.ResponseWriter, r *http.Request, token string) {
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
 		Secure:   r.TLS != nil,
+		// 持久 cookie：没有 MaxAge 就是「会话 cookie」，浏览器一关就没了，
+		// 每次重开都要重新输密码（2026-11-19 用户反馈）。有效期与会话 TTL 一致。
+		MaxAge: int(sessionTTL / time.Second),
 	}
 	if token == "" {
 		c.MaxAge = -1 // 删除
