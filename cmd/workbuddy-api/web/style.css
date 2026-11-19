@@ -122,6 +122,31 @@ body {
 }
 .map-editor .preset { display: inline-block; margin: 0 4px 4px 0; }
 
+/* 模型路由引导区（① 选客户端一键配好 / ② 输入模型名验算）
+   设计意图：这块配置的本质是「翻译客户端模型名」，用户不该被迫先理解 model_map 语法。
+   所以把「能一步做对的」做成按钮，「配完对不对」做成即时反馈，语法说明收进编辑器。 */
+.route-guide {
+  margin: 10px 0 12px; padding: 10px 12px;
+  border: 1px solid #dbe3ff; border-radius: var(--radius);
+  background: #f5f7ff;
+}
+.route-guide-q { font-size: 13px; font-weight: 600; color: var(--text); margin-bottom: 8px; }
+.route-guide-btns { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.route-result {
+  margin-top: 8px; padding: 8px 10px; border-radius: 8px;
+  font-size: 12px; line-height: 1.9;
+  background: #fff; border: 1px solid var(--border);
+}
+.route-result code {
+  background: #f0f2f5; padding: 1px 5px; border-radius: 4px;
+  font-family: ui-monospace, Consolas, monospace; font-size: 11.5px;
+}
+.route-result .ok { color: var(--ok); font-weight: 600; }
+.route-result .warn { color: var(--warn); font-weight: 600; }
+.route-result .bad { color: var(--danger); font-weight: 600; }
+.route-result .arrow { color: var(--muted); margin: 0 4px; }
+.route-result .rowline { margin-top: 4px; }
+
 /* 渠道积分汇总条（账号卡片上方，数据与卡片同源） */
 .credit-summary {
   display: flex; flex-wrap: wrap; gap: 8px 10px; align-items: center;

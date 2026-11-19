@@ -420,50 +420,83 @@
       <!-- 模型路由（cc/codex 映射） -->
       <div class="cfg-section">
         <div class="cfg-heading">模型路由（Claude Code / Codex 映射）</div>
+        <div class="hint" style="margin-top:0;margin-bottom:10px">
+          这一块只干一件事：<b>把你客户端发来的模型名，翻译成我们这儿真实存在的模型名</b>。<br>
+          不配也能用——但客户端里必须直接写 <code>渠道/模型</code>（如 <code>workbuddy/glm-5.3</code>）。
+          Claude Code / Codex 自己发的是 <code>claude-sonnet-4-5</code>、<code>gpt-5-codex</code> 这类名字，
+          我们这儿一个都没有，所以<b>用它们就必须先点下面的按钮配好</b>。
+        </div>
+
+        <div class="route-guide">
+          <div class="route-guide-q">① 你在用什么客户端？点一下，自动帮你配好</div>
+          <div class="route-guide-btns">
+            <span class="btn small" id="btnRouteClaude">我用 Claude Code</span>
+            <span class="btn small" id="btnRouteCodex">我用 Codex</span>
+            <span class="hint" id="routePickHint">两个都用就两个都点一次 · 点了立即生效，不用再按保存</span>
+          </div>
+          <div id="routeResult" class="route-result hidden"></div>
+
+          <div class="route-guide-q" style="margin-top:12px">② 不确定配得对不对？敲一个模型名试一下</div>
+          <div class="row">
+            <input id="routeProbe" class="input grow" spellcheck="false" autocomplete="off"
+              placeholder="例如 claude-sonnet-4-5-20250929 或 gpt-5-codex（不用按回车，边打边显示）">
+          </div>
+          <div id="routeProbeOut" class="route-result hidden"></div>
+        </div>
+
         <div class="row">
-          <label class="lbl wide" title="客户端模型名没有匹配到映射表时的处理方式">未匹配模型时</label>
+          <label class="lbl wide" title="客户端发来的模型名，既没在下面的对照表里，也不是 渠道/模型 形式时，交给谁处理">没配过映射的模型走哪</label>
           <select id="selCh" class="select"></select>
         </div>
-        <div class="hint">选「自动」时：在所有已接入渠道中查找同名模型，按<b>免费 / 低费率优先</b>选择；未命中任何渠道才报错。选具体渠道时：所有未匹配模型都走该渠道兜底。</div>
+        <div class="hint">
+          <b>保持「自动」就好。</b>遇到没配过的名字，网关会去所有渠道里找同名的：找到就用，
+          找不到会明确告诉你「这个模型名哪个渠道都没有」。<br>
+          选成某个具体渠道 = 不管客户端叫什么名字，都原样硬塞给它。名字不对时上游只会回一个 404，
+          排查起来很费劲，所以除非你清楚自己在做什么，别选具体渠道。
+        </div>
         <div class="row">
-          <label class="lbl wide">封顶 tokens</label>
+          <label class="lbl wide" title="只对 Claude Code / Codex 的接口生效；客户端要的 max_tokens 超过这里就截断">单次回复上限</label>
           <input id="inMaxTok" class="input port" type="number" min="0" step="1000">
-          <span class="hint" style="margin-left:6px">0=不限制</span>
+          <span class="hint" style="margin-left:6px">tokens，0 = 不限制</span>
+        </div>
+        <div class="hint">
+          只对 Claude Code / Codex 生效（它们用的是另外两套接口协议）。客户端想要 8000 就截到这儿；
+          填 32000 等于基本不拦。只有上游报「max_tokens 太大」时才需要调小。
         </div>
         <div class="row" style="align-items:center">
-          <label class="lbl wide" title="给客户端模型名起一个别名，让它固定走某个渠道的某个模型；也支持 Claude Code / Codex 常用名的通配映射">自定义模型 / 别名</label>
+          <label class="lbl wide" title="左边客户端模型名，右边真实要走的 渠道/模型">模型名对照表</label>
           <span class="btn small" id="btnCompatMap">编辑</span>
           <span class="hint" id="mapSummary" style="margin-left:6px"></span>
         </div>
         <div id="mapEditor" class="map-editor hidden">
           <div class="hint" style="margin-bottom:6px">
-            <b>规则很简单</b>：左边写客户端会调用的模型名（可以随便起，如 <code>my-cheap-code</code>），
-            右边写真实要走的 <code>渠道/模型名</code>。<br>
-            例：<code>my-cheap-code = glm/glm-5.2</code>；通配：<code>claude-* = workbuddy/glm-5.2</code>。
-            这里创建的是「固定走某一个模型」的别名；若要让多个渠道候选自动切换，用下方的「多候选自定义模型」。
+            <b>一行就是一条「翻译」</b>：等号左边 = 客户端会发的名字（可以带 <code>*</code> 通配），
+            等号右边 = 我们这儿真实存在的 <code>渠道/模型</code>。<br>
+            例：<code>claude-* = workbuddy/glm-5.3</code> 意思是「凡是 claude- 开头的，都走 workbuddy 的 glm-5.3」。<br>
+            精确名优先于通配：写了 <code>claude-opus-*</code> 和 <code>claude-*</code> 时，
+            Opus 走前者，其余走后者。这里每条只能指向一个模型；要让一个名字挂多个渠道轮流用，用下面的「多候选」。
           </div>
-          <div class="hint" style="margin-bottom:8px;padding:8px 10px;border-left:2px solid var(--info);background:var(--bg-soft,rgba(0,0,0,.03))">
-            <b>「模型名」怎么填？</b> 别猜、别手敲——用下方输入框的<b>下拉候选</b>直接选，那里列出的是各渠道当前真实可用的模型名（含费率），选中的就是正确写法。<br>
-            · <b>渠道名</b>固定是这几种：<code>workbuddy</code>、<code>workbuddyai</code>、<code>traework</code>、<code>traecode</code>、<code>qodercn</code>、<code>qodercom</code>、<code>qwenwork</code>（千问办公）、<code>glm</code>（智谱清言）、<code>monkeycode</code>、<code>raccoon</code>（小浣熊）、<code>loomy</code>、<code>customopenai</code>（自定义渠道）。<br>
-            · <b>自定义渠道</b>：模型名写 <code>customopenai/&lt;模型id&gt;</code>，其中「模型 id」必须与你<b>在设置里为那个实例填写的模型列表</b>一致（不是随便起，对端上游返回什么就填什么）；没在「自定义渠道」区添加实例时，这个前缀不可用。<br>
-            · <b>小浣熊模型</b>要保持 <code>sn-</code> 前缀，如 <code>raccoon/sn-sensenova-6-8-flash</code>、<code>raccoon/sn-glm-5-3-flash</code>；去掉前缀会被上游当成未知模型。<br>
-            · <b>其余渠道</b>用裸名即可，如 <code>workbuddy/glm-5.2</code>、<code>qodercn/kimi-k3</code>。<br>
-            · 不确定就点开「费率」页看模型清单，或从上方下拉候选中选一个。
+          <div class="hint" style="margin-bottom:8px;padding:8px 10px;border-left:2px solid var(--primary);background:var(--bg,#f5f6f8)">
+            <b>右边的「渠道/模型」别手敲</b>——用下面表单里的<b>下拉候选</b>选，那是各渠道当前真实存在的模型名（带倍率），选中的就是正确写法。
+            候选是空的话，先到「费率」页点一次刷新。<br>
+            · 小浣熊（<code>raccoon</code>）的模型必须带 <code>sn-</code> 前缀，如 <code>raccoon/sn-glm-5-3</code>，去掉会被上游当成未知模型。<br>
+            · 自定义渠道写 <code>customopenai/&lt;模型id&gt;</code>，「模型 id」必须和你在「自定义渠道」里填的一致。<br>
+            · 其他渠道都是裸名，如 <code>workbuddy/glm-5.3</code>、<code>qodercn/glm-5.3</code>。
           </div>
-          <div class="hint" style="margin-bottom:4px">也可以用下方引导式表单添加一条别名：</div>
+          <div class="hint" style="margin-bottom:4px">不想手写？用下面这行加一条：</div>
           <div class="row">
-            <input id="aliasName" class="input grow" placeholder="客户端模型名（别名），如 my-cheap-code" spellcheck="false">
+            <input id="aliasName" class="input grow" placeholder="客户端发的名字，如 claude-sonnet-4-5" spellcheck="false">
           </div>
           <div class="row">
             <select id="aliasChannel" class="select" style="max-width:180px"></select>
-            <input id="aliasModel" class="input grow" placeholder="目标模型名，如 glm-5.2" list="aliasModelList" spellcheck="false">
+            <input id="aliasModel" class="input grow" placeholder="走哪个模型（点一下从候选里选）" list="aliasModelList" spellcheck="false">
             <datalist id="aliasModelList"></datalist>
-            <button class="btn small" id="btnAddAlias">添加别名</button>
+            <button class="btn small" id="btnAddAlias">加进去</button>
           </div>
-          <div class="hint" style="margin:6px 0 4px">或直接维护完整映射表（一行一条）：</div>
+          <div class="hint" style="margin:6px 0 4px">或者直接改整张表（一行一条）：</div>
           <textarea id="mapText" class="input map-text" spellcheck="false" rows="6"></textarea>
           <div class="hint" style="margin-top:5px">
-            缺省建议（点击插入）：<span id="mapPresets"></span>
+            常用的一键插入（按你已接入的渠道 + 真实模型生成）：<span id="mapPresets"></span>
           </div>
           <div class="hint" id="mapErr" style="color:var(--danger);margin-top:4px"></div>
         </div>
@@ -471,30 +504,30 @@
         <!-- 多候选自定义模型：别名 → 多个候选 `渠道/模型`，网关按免费/低费率优先排序，
              额度用尽（429/6004）时自动在候选之间切号。 -->
         <div class="row" style="align-items:center; margin-top:12px">
-          <label class="lbl wide" title="给客户端模型名起一个别名，关联多个候选渠道/模型">多候选自定义模型</label>
+          <label class="lbl wide" title="一个客户端模型名挂多个候选渠道/模型，前一个额度用尽自动换下一个">一个名字挂多个模型</label>
           <span class="btn small" id="btnCompatMulti">管理</span>
           <span class="hint" id="multiSummary" style="margin-left:6px"></span>
         </div>
         <div id="multiMapEditor" class="map-editor hidden">
           <div class="hint" style="margin-bottom:6px">
-            <b>规则很简单</b>：左边客户端模型名（别名），右边逗号或换行分隔的候选阵列，
-            候选项全部是 <code>渠道/模型名</code>。<br>
-            例：<code>my-all-in = glm/glm-5.2, qoder/completions</code>。<br>
-            网关按<b>免费 / 低费率优先</b>给候选排序；额度用尽时自动换到下一个候选，
-            全部用尽后把最后一条上游错误透传给你。
+            <b>和上面的区别</b>：上面一个名字只能指向一个模型，用光了就报错；
+            这里一个名字可以挂<b>好几个</b>模型，前一个额度用光，自动换下一个。<br>
+            写法：<code>my-code = workbuddy/glm-5.3, qodercn/glm-5.3</code>（逗号分隔，全部要写 <code>渠道/模型</code>）。<br>
+            顺序由网关按<b>免费 / 低费率优先</b>自动排，你不用管谁在前。全部用光才会把最后一条上游错误报给你。<br>
+            <b>只接一个客户端的话，这里可以一直空着。</b>
           </div>
           <div class="hint" style="margin-bottom:4px">
-            也可以用下方引导式表单添加多候选别名：
+            用下面这行加一条：
           </div>
           <div class="row">
-            <input id="multiAliasName" class="input grow" placeholder="客户端模型名（别名），如 my-all-in" spellcheck="false">
+            <input id="multiAliasName" class="input grow" placeholder="客户端发的名字，如 my-code" spellcheck="false">
           </div>
           <div class="row">
-            <textarea id="multiCandidates" class="input grow" placeholder="候选阵列，如 glm/glm-5.2, qoder/completions（逗号或换行分隔）" spellcheck="false" style="height:60px; resize: vertical;"></textarea>
-            <button class="btn small" id="btnAddMulti">添加别名</button>
+            <textarea id="multiCandidates" class="input grow" placeholder="要挂哪些模型，如 workbuddy/glm-5.3, qodercn/glm-5.3（逗号或换行分隔）" spellcheck="false" style="height:60px; resize: vertical;"></textarea>
+            <button class="btn small" id="btnAddMulti">加进去</button>
           </div>
-          <div class="hint" style="margin:6px 0 4px">或直接维护完整多候选表（一行一个别名）：</div>
-          <textarea id="multiMapText" class="input map-text" spellcheck="false" rows="6" placeholder="my-all-in = glm/glm-5.2, qoder/completions"></textarea>
+          <div class="hint" style="margin:6px 0 4px">或者直接改整张表（一行一个名字）：</div>
+          <textarea id="multiMapText" class="input map-text" spellcheck="false" rows="6" placeholder="my-code = workbuddy/glm-5.3, qodercn/glm-5.3"></textarea>
           <div class="hint" id="multiErr" style="color:var(--danger);margin-top:4px"></div>
         </div>
       </div>

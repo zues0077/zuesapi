@@ -144,6 +144,10 @@ function liveTagHtml(a) {
 async function loadFees() {
   try {
     const fees = await api("/api/fees");
+    // 存进 state：模型名下拉候选、以及「模型路由」的一键推荐都要读这份真实清单。
+    // 曾经只有 renderFees.lastData 持有它，导致 renderAliasForm 读 state.fees 永远是空,
+    // 「模型名」下拉一个候选都没有（用户只能手敲，敲错就是静默走错渠道）。
+    state.fees = fees;
     renderFees(fees);
   } catch (e) { /* 费率接口失败不阻塞 */ }
 }
@@ -153,6 +157,7 @@ async function refreshFees() {
   try {
     await api("/api/fees/refresh", {});
     const fees = await api("/api/fees");
+    state.fees = fees;
     renderFees(fees);
     toast("模型列表和费率已刷新");
   } catch (e) { toast(e.message); } finally {
@@ -2015,6 +2020,7 @@ function openSettings() {
   $("multiErr").textContent = "";
   renderMapPresets(channels);
   renderAliasForm(channels);
+  syncRouteGuide();
   // 渠道代理
   renderProxyList();
   // 自动签到 + 开机自启 + 临期阈值
@@ -2945,16 +2951,21 @@ function renderAliasForm(channels) {
   if (bound.has("traework")) bound.add("traecode");
   const usable = channels.filter(c => bound.has(c));
   const list = usable.length ? usable : channels;
+  const prev = sel.value;
   sel.innerHTML = list.map(c => `<option value="${c}">${c}</option>`).join("");
+  // 重画后尽量保留用户已选的渠道，避免每次刷新跳回第一个
+  if (prev && list.includes(prev)) sel.value = prev;
 
   const dl = $("aliasModelList");
   if (!dl) return;
-  // 用当前缓存的费率/模型清单喂 datalist：让用户点选真实存在的模型，而非凭记忆敲。
+  // 只列「当前选中渠道」的模型：跨渠道混在一起最容易点出「渠道 A + 模型 B」这种不存在的组合。
+  const cur = sel.value;
   const rows = [];
   for (const ch of (state.fees?.channels || [])) {
-    if (list.length && !list.includes(ch.channel)) continue;
+    if (cur ? ch.channel !== cur : (list.length && !list.includes(ch.channel))) continue;
     for (const m of (ch.models || [])) {
-      rows.push(`<option value="${esc(m.model)}">${esc(ch.channel)} · ${m.priced ? `倍率 ${m.rate}` : "费率未知"}</option>`);
+      const rate = m.free ? "免费" : (m.priced ? `倍率 ${m.rate}` : "费率未知");
+      rows.push(`<option value="${esc(m.model)}">${esc(rate)}${m.supports_tools ? " · 支持工具" : ""}</option>`);
     }
   }
   dl.innerHTML = rows.slice(0, 400).join("");
@@ -2985,41 +2996,342 @@ function addAliasFromForm() {
 
 // ---------- 模型映射编辑器 ----------
 
-// CHANNEL_PRESETS 各渠道的缺省建议映射（模型为该渠道常用/免费模型）。
-// 用途：未绑定某渠道账号、或不知道该渠道有哪些模型时，给出可点选的起点。
-const CHANNEL_PRESETS = {
-  workbuddy:   { label: "Claude Code → workbuddy",  items: ["claude-* = workbuddy/glm-5.2", "claude-sonnet-* = workbuddy/kimi-k2.7"] },
-  traework:    { label: "Codex → traework",          items: ["gpt-5* = traework/glm-5.2", "codex-* = traework/DeepSeek-V4-Pro"] },
-  // TraeCode 与 TraeWork 共用账号，预设沿用 Codex 语义（面向代码场景的新版模型）。
-  traecode:    { label: "Codex → traecode",          items: ["gpt-5* = traecode/deepseek-v4.1-flash", "codex-* = traecode/glm-5.3-flash"] },
-  workbuddyai: { label: "Claude Code → workbuddyai", items: ["claude-* = workbuddyai/deepseek-v4.1-flash"] },
-  qodercn:     { label: "→ qodercn",                 items: ["gpt-* = qodercn/glm-5.3"] },
-  qodercom:    { label: "→ qodercom",                items: ["gpt-* = qodercom/glm-5.3"] },
-  qwenwork:    { label: "→ qwenwork",                items: ["gpt-* = qwenwork/flash", "claude-* = qwenwork/pro"] },
-  glm:         { label: "→ glm (智谱清言)",           items: ["gpt-* = glm/chatglm", "claude-* = glm/chatglm-think"] },
+// ---------- 模型路由：一键配好 + 即时验算 ----------
+//
+// 这块配置的本质只有一个：把客户端发来的模型名，翻译成我们这儿真实存在的「渠道/模型」。
+// 所以界面不要求用户先看懂映射语法：
+//   ① 点「我用 Claude Code / 我用 Codex」→ 从真实费率清单里挑出能用的模型，写好映射并直接生效；
+//   ② 在输入框敲一个模型名 → 立刻显示它会被翻译成什么，配错了当场看得出来。
+//
+// 为什么不再用写死的渠道预设（旧 CHANNEL_PRESETS）：里面的模型名会随上游下线而过期
+// （2026-11-19 核到 `workbuddy/kimi-k2.7`、`glm/chatglm` 都已不存在），
+// 用户点了预设反而配出一条必然失败的规则。现在一律从 /api/fees 的实时清单里挑。
+
+// ROUTE_BLOCKLIST 明显不是对话模型的条目：即使上游标了 supports_tools，
+// 也不能拿来当 Claude Code / Codex 的主力（它们要么不是聊天模型，要么是子任务专用）。
+const ROUTE_BLOCKLIST = [
+  /(^|[_-])advisor([_-]|$)/i, /computer[_-]?use/i, /embedding/i, /rerank/i,
+  /(^|[_-])tts([_-]|$)/i, /whisper/i, /(^|[_-])image([_-]|$)/i, /(^|[_-])video([_-]|$)/i, /(^|[_-])ocr([_-]|$)/i,
+];
+
+// routePool 收集「客户端接入可用」的候选，并按「能不能马上用 → 免不免费 → 便宜不便宜」排序。
+//
+// 筛选口径（每条都有实际原因，不是拍脑袋）：
+//   - supports_tools 必须为真：Claude Code / Codex 全靠 tool use，不支持工具的模型接上去第一步就报错；
+//   - 排除非对话模型（见 ROUTE_BLOCKLIST）；
+//   - 当日已被限流的免费模型排在最后：否则配完很快就报「额度用尽」，用户会以为配置没生效。
+function routePool() {
+  const rows = [];
+  for (const ch of (state.fees?.channels || [])) {
+    for (const m of (ch.models || [])) {
+      const name = String(m.model || "");
+      if (!name || !m.supports_tools) continue;
+      if (ROUTE_BLOCKLIST.some((re) => re.test(name))) continue;
+      rows.push({
+        channel: ch.channel,
+        model: name,
+        rate: typeof m.rate === "number" ? m.rate : 0,
+        priced: !!m.priced,
+        free: !!m.free,
+        exhausted: !!m.exhausted,
+        ctx: m.context_window || 0,
+      });
+    }
+  }
+  rows.sort((a, b) => {
+    if (a.exhausted !== b.exhausted) return a.exhausted ? 1 : -1;
+    if (a.free !== b.free) return a.free ? -1 : 1;
+    if (a.priced !== b.priced) return a.priced ? -1 : 1;
+    if (a.rate !== b.rate) return a.rate - b.rate;
+    return a.channel.localeCompare(b.channel);
+  });
+  return rows;
+}
+
+// routeStrongRange 强档模型的倍率区间。上限 1.5 是为了挡住 6.67x 这类明显烧钱的旗舰，
+// 下限 0.3 是为了别把「和主力差不多便宜」的模型当成强档（那还不如不加这条映射）。
+const ROUTE_STRONG_MIN = 0.3, ROUTE_STRONG_MAX = 1.5;
+
+// ROUTE_MAIN_MIN_RATE 主力的最低倍率门槛（0.05 = 5 分钱/单位）。
+// 为什么不直接拿「免费或最便宜」当主力（2026-11-19 用 246 真实清单实测的教训）：
+//   - 按「免费优先」排，主力会落到 raccoon/sn-sensenova-6-8-flash 这类免费小模型上，
+//     拿它跑 Claude Code 的工具调用很容易出格式问题，而且免费额度被限流后不会自动恢复；
+//   - 低于 0.05x 的基本都是极小的 flash 模型，当编码主力不划算。
+// 所以主力取「已定价且 ≥0.05x」里最便宜的那个（真实数据下是 glm-5.3-flash 0.08x），
+// 池子里实在没有付费模型时才退回免费的。
+const ROUTE_MAIN_MIN_RATE = 0.05;
+
+// pickRouteModels 挑「主力」和「可选强档」。
+//   主力 = 已定价、≥0.05x、支持工具里最便宜的（跑得动 Claude Code 的最低成本档）；
+//   强档 = 倍率落在 0.3~1.5 之间最贵的那个（Claude Code 指名 Opus 时才用它）。
+function pickRouteModels() {
+  const pool = routePool();
+  if (!pool.length) return null;
+  const main = pool.find((r) => r.priced && !r.free && r.rate >= ROUTE_MAIN_MIN_RATE) || pool[0];
+  let strong = null;
+  for (const r of pool) {
+    if (!r.priced || r.rate < ROUTE_STRONG_MIN || r.rate > ROUTE_STRONG_MAX) continue;
+    if (!strong || r.rate > strong.rate) strong = r;
+  }
+  if (strong && strong.channel === main.channel && strong.model === main.model) strong = null;
+  return { main, strong };
+}
+
+// rateLabel 把费率说成人话：免费 / 0.08x / 费率未知。
+function rateLabel(r) {
+  if (r.free) return "免费";
+  if (!r.priced) return "费率未知";
+  return `${r.rate}x`;
+}
+
+// CLIENT_ENTRIES 各客户端「默认会发什么模型名」→ 该翻译成哪个模型。
+// 前缀来自客户端自身行为（Claude Code 发 claude-*、Codex 发 gpt-*/codex-*），不是我们编的。
+const CLIENT_ENTRIES = {
+  claude: {
+    label: "Claude Code",
+    build: (p) => {
+      const out = [["claude-*", `${p.main.channel}/${p.main.model}`]];
+      // 只有明确指名 Opus 时才走强档；通配取最长匹配，所以这条会优先于 claude-*。
+      if (p.strong) out.push(["claude-opus-*", `${p.strong.channel}/${p.strong.model}`]);
+      return out;
+    },
+  },
+  codex: {
+    label: "Codex",
+    // Codex 主用最便宜的即可；不额外挂强档，避免一次长任务把贵的模型烧掉。
+    build: (p) => [
+      ["gpt-*", `${p.main.channel}/${p.main.model}`],
+      ["codex-*", `${p.main.channel}/${p.main.model}`],
+    ],
+  },
 };
 
-// renderMapPresets 按当前已接入渠道渲染缺省建议按钮。
-// 仅列出「已接入（有账号）」的渠道——未绑定的渠道点了也会因无账号而失败，不给误导性入口。
+// currentModelMap 取「当前编辑中的映射表」：编辑器有内容就以其为准（用户可能刚手改过），
+// 否则用已保存的配置。解析失败时退回已保存值，避免把用户刚敲的半行当成配置。
+function currentModelMap() {
+  const raw = $("mapText").value.trim();
+  if (raw) {
+    const [parsed] = parseMapText(raw);
+    if (parsed) return parsed;
+  }
+  return { ...(state.compat?.model_map || {}) };
+}
+
+// applyClientPreset 一键配好某个客户端：合并映射 → 立即保存 → 用一句话汇报结果。
+// 不覆盖已有同名规则（用户手工调过的保留），只补缺失的那几条。
+async function applyClientPreset(kind) {
+  const cfg = CLIENT_ENTRIES[kind];
+  const box = $("routeResult");
+  box.classList.remove("hidden");
+
+  const picked = pickRouteModels();
+  if (!picked) {
+    box.innerHTML = `<span class="bad">现在挑不出能用的模型</span>：刚启动时模型清单还没拉回来，
+      或者你接入的渠道都不支持工具调用（Claude Code / Codex 必须用支持工具的模型）。
+      先去「费率」页点一次刷新，再回来点这个按钮。`;
+    return;
+  }
+
+  const entries = cfg.build(picked);
+  // 多候选用「编辑器里的当前内容」优先，避免把用户刚改没保存的多候选表冲掉。
+  // 编辑器没展开或内容是空时，一律用已保存值——否则空字符串会被解析成空表，
+  // 反而把用户已保存的多候选配置覆盖掉。
+  let multiMap = state.compat?.custom_models || {};
+  const multiRaw = $("multiMapText")?.value || "";
+  if (!$("multiMapEditor").classList.contains("hidden") && multiRaw.trim()) {
+    const [parsed] = parseMultiMapText(multiRaw);
+    if (parsed) multiMap = parsed;
+  }
+
+  const merged = currentModelMap();
+  const added = [];
+  const clashWithMulti = [];
+  for (const [k, v] of entries) {
+    // 后端不允许 model_map 与 custom_models 共用同一个名字（解析顺序会打架），
+    // 用户在「一个名字挂多个模型」里配过的名字，这里跳过并说明，不强行覆盖。
+    if (multiMap[k]) { clashWithMulti.push(k); continue; }
+    if (merged[k]) continue; // 已有同名规则 → 尊重用户设置，不覆盖
+    merged[k] = v;
+    added.push(`${k} = ${v}`);
+  }
+
+  const maxTokensCap = parseInt($("inMaxTok").value, 10) || 0;
+  // 兜底一律切「自动」：陌生名字走同名查找，报错会明说「哪个渠道都没有」，
+  // 比绑死某个渠道后收到上游 404 好排查得多。
+  const defaultChannel = "auto";
+  try {
+    await api("/api/config/compat", {
+      default_channel: defaultChannel,
+      max_tokens_cap: maxTokensCap,
+      model_map: merged,
+      custom_models: multiMap,
+    });
+  } catch (e) {
+    box.innerHTML = `<span class="bad">保存失败</span>：${esc(e.message)}`;
+    return;
+  }
+
+  // 同步本地状态与界面，避免「看起来没保存」
+  state.compat = state.compat || {};
+  state.compat.model_map = merged;
+  state.compat.default_channel = defaultChannel;
+  state.compat.max_tokens_cap = maxTokensCap;
+  $("selCh").value = "auto";
+  $("mapText").value = Object.entries(merged).map(([k, v]) => `${k} = ${v}`).join("\n");
+  $("mapSummary").textContent = Object.entries(merged).map(([k, v]) => `${k} → ${v}`).join("\u00A0 \u00A0");
+
+  const mainLine = `${picked.main.channel}/${picked.main.model}（${rateLabel(picked.main)}）`;
+  const strongLine = picked.strong
+    ? `指名 Opus 时才用 <code>${esc(picked.strong.channel)}/${esc(picked.strong.model)}</code>（${rateLabel(picked.strong)}）。`
+    : "";
+  const addedLine = added.length
+    ? `这次补了 ${added.length} 条：<code>${added.map(esc).join("</code>、<code>")}</code>。已有的规则没动。`
+    : `这些规则之前就配好了，这次没有改动。`;
+  const clashLine = clashWithMulti.length
+    ? `<br><span class="warn">跳过</span>：<code>${clashWithMulti.map(esc).join("</code>、<code>")}</code> 你已经在「一个名字挂多个模型」里配过了，同一个名字不能两边都用。`
+    : "";
+
+  box.innerHTML =
+    `<span class="ok">✅ 已生效，不用重启</span>：${esc(cfg.label)} 发来的模型名，` +
+    `一律翻译成 <code>${esc(mainLine)}</code>。${strongLine}<br>` +
+    `${addedLine}兜底同时切成「自动」（陌生名字会明确报「哪个渠道都没有」）。${clashLine}<br>` +
+    (picked.main.free
+      ? `<span class="warn">注意</span>：主力是免费模型，额度被上游限流后请求会失败。真遇到了，回来再点一次这个按钮，会重新挑一个还能用的。`
+      : `只影响 ${esc(cfg.label)} 这类客户端；你直接写 <code>渠道/模型</code> 的请求不受影响。想换模型就改右边那张表里的名字。`);
+}
+
+// syncRouteGuide 重置引导区（每次打开设置都从干净状态开始，避免上次的结论误导）。
+// 模型清单还没拉到时顺手补拉一次再重画按钮——首屏设置可能早于 /api/fees 返回。
+function syncRouteGuide() {
+  const res = $("routeResult");
+  if (res) { res.classList.add("hidden"); res.innerHTML = ""; }
+  const probe = $("routeProbe");
+  if (probe) probe.value = "";
+  const out = $("routeProbeOut");
+  if (out) { out.classList.add("hidden"); out.innerHTML = ""; }
+
+  const hint = $("routePickHint");
+  const n = routePool().length;
+  if (hint && n) hint.textContent = `两个都用就两个都点一次 · 点了立即生效（现在有 ${n} 个模型可挂）`;
+  if (n) return;
+  loadFees().then(() => {
+    if ($("settingsOverlay")?.classList.contains("hidden")) return;
+    const chs = state.compat?.channels || [];
+    renderMapPresets(chs);
+    renderAliasForm(chs);
+    const m = routePool().length;
+    if (hint && m) hint.textContent = `两个都用就两个都点一次 · 点了立即生效（现在有 ${m} 个模型可挂）`;
+  }).catch(() => { /* 拉不到就保持「去费率页刷新」的提示 */ });
+}
+
+// channelModelSet 取某渠道当前真实存在的模型名集合（用于验算「这个名字该渠道有没有」）。
+function channelModelSet(ch) {
+  const out = new Set();
+  for (const c of (state.fees?.channels || [])) {
+    if (c.channel !== ch) continue;
+    for (const m of (c.models || [])) out.add(String(m.model || ""));
+  }
+  return out;
+}
+
+// probeRoute 复刻后端 Router.Resolve 的判定顺序，只用于面板即时验算，不参与真实请求。
+// 顺序：渠道前缀 → 映射精确 → 映射最长通配 → 多候选 → 兜底（自动/指定渠道）。
+function probeRoute(raw) {
+  const orig = String(raw || "").trim();
+  if (!orig) return null;
+  // 倍率后缀（/v1/models 下发的 " (0.06x)"）在查表前剥掉，和后端一致
+  const name = orig.replace(/\s*\([0-9.]+x\)\s*$/, "");
+  const channels = new Set(state.compat?.channels || []);
+  const map = currentModelMap();
+  const multi = state.compat?.custom_models || {};
+
+  // 1) 已带渠道前缀
+  const slash = name.indexOf("/");
+  if (slash > 0) {
+    const prefix = name.slice(0, slash);
+    if (!channels.size || channels.has(prefix)) {
+      return { ok: true, target: name, why: `你写的就是「渠道/模型」，直通 <b>${esc(prefix)}</b> 渠道` };
+    }
+    return { ok: false, target: name, why: `前面的 <code>${esc(prefix)}</code> 不是已接入的渠道` };
+  }
+  // 2) 映射精确
+  if (map[name]) {
+    return { ok: true, target: map[name], why: `命中对照表里的精确规则 <code>${esc(name)} = ${esc(map[name])}</code>` };
+  }
+  // 3) 映射最长通配
+  let best = "";
+  for (const k of Object.keys(map)) {
+    if (!k.endsWith("*")) continue;
+    if (name.startsWith(k.slice(0, -1)) && k.length > best.length) best = k;
+  }
+  if (best) {
+    return { ok: true, target: map[best], why: `命中通配规则 <code>${esc(best)} = ${esc(map[best])}</code>` };
+  }
+  // 4) 多候选别名
+  if (Array.isArray(multi[name]) && multi[name].length) {
+    const first = multi[name][0];
+    return { ok: true, target: first, why: `是多候选别名，实际会走排在最前的候选 <code>${esc(first)}</code>（额度用光自动换下一个）` };
+  }
+  // 5) 兜底
+  const def = $("selCh").value || "auto";
+  if (def === "auto") {
+    const hits = [];
+    for (const c of (state.fees?.channels || [])) {
+      if (channels.size && !channels.has(c.channel)) continue;
+      if ((c.models || []).some((m) => String(m.model || "") === name)) hits.push(c.channel);
+    }
+    if (hits.length) {
+      return { ok: true, target: `${hits[0]}/${name}`, why: `没有对照规则，但 <b>${esc(hits.join(" / "))}</b> 里有同名模型，自动选最便宜的那个` };
+    }
+    return { ok: false, target: "", why: `对照表里没有，所有已接入渠道也都没有叫 <code>${esc(name)}</code> 的模型 —— 客户端会直接报错。给它加一条对照规则就好。` };
+  }
+  const exists = channelModelSet(def).has(name);
+  return exists
+    ? { ok: true, target: `${def}/${name}`, why: `<b>${esc(def)}</b> 里有这个模型，按兜底设置走它` }
+    : { ok: false, target: `${def}/${name}`, why: `<b>${esc(def)}</b> 里没有叫 <code>${esc(name)}</code> 的模型，请求会被上游拒绝。（把「没配过映射的模型走哪」改成「自动」会更容易排查）` };
+}
+
+// renderRouteProbe 把验算结果画到引导区（边输入边刷新）。
+function renderRouteProbe() {
+  const box = $("routeProbeOut");
+  const r = probeRoute($("routeProbe").value);
+  if (!r) { box.classList.add("hidden"); box.innerHTML = ""; return; }
+  box.classList.remove("hidden");
+  const badge = r.ok
+    ? `<span class="ok">✅ 能通</span>`
+    : `<span class="bad">❌ 会失败</span>`;
+  const arrow = r.target
+    ? `<span class="arrow">→</span><code>${esc(r.target)}</code>`
+    : "";
+  box.innerHTML = `${badge}${arrow}<div class="rowline">${r.why}</div>`;
+}
+
+// renderMapPresets 按已接入渠道渲染「该渠道最便宜可用模型」的快捷别名。
+// 每个按钮插入的 key 是 `<渠道>-cheap`，彼此不冲突，客户端填这个名字就能用该渠道的便宜模型。
 function renderMapPresets(channels) {
-  const bound = new Set((state.accounts || []).map(a => a.group));
-  // TraeCode 与 TraeWork 共用账号，账号列表里只会出现 traework；
-  // 但 TraeCode 是可独立路由的渠道，其预设也应可见。
-  if (bound.has("traework")) bound.add("traecode");
   const box = $("mapPresets");
-  box.innerHTML = channels.filter(c => CHANNEL_PRESETS[c] && bound.has(c)).map(c => {
-    const p = CHANNEL_PRESETS[c];
-    return `<span class="btn tiny preset" data-ch="${c}" title="${esc(p.items.join("\n"))}">${esc(p.label)}</span>`;
-  }).join(" ") || `<span class="hint">（尚未接入任何渠道，先在账号管理添加账号）</span>`;
-  box.querySelectorAll(".preset").forEach(b => {
+  if (!box) return;
+  const pool = routePool();
+  const best = new Map();
+  for (const r of pool) if (!best.has(r.channel)) best.set(r.channel, r); // pool 已排序 → 首个即该渠道最优
+  const rows = [...best.values()].filter((r) => (channels || []).includes(r.channel));
+  if (!rows.length) {
+    box.innerHTML = `<span class="hint">（还没有可用的模型清单：先在账号管理接入账号，再到「费率」页点一次刷新）</span>`;
+    return;
+  }
+  box.innerHTML = rows.map((r) => {
+    const alias = `${r.channel}-cheap`;
+    const line = `${alias} = ${r.channel}/${r.model}`;
+    return `<span class="btn tiny preset" data-line="${esc(line)}" title="${esc(`${line}（${rateLabel(r)}）`)}">${esc(alias)} · ${esc(rateLabel(r))}</span>`;
+  }).join(" ");
+  box.querySelectorAll(".preset").forEach((b) => {
     b.onclick = () => {
-      const p = CHANNEL_PRESETS[b.dataset.ch];
-      // 追加尚未存在的行，避免重复插入
-      const cur = $("mapText").value.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
-      const have = new Set(cur.map(l => l.split("=")[0].trim()));
-      const add = p.items.filter(it => !have.has(it.split("=")[0].trim()));
-      if (!add.length) { toast(`${p.label} 的建议映射已存在`); return; }
-      $("mapText").value = cur.concat(add).join("\n");
+      const line = b.dataset.line;
+      const key = line.split("=")[0].trim();
+      const cur = $("mapText").value.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+      if (cur.some((l) => l.split("=")[0].trim() === key)) { toast(`已经有 ${key} 了`); return; }
+      $("mapText").value = cur.concat([line]).join("\n");
+      toast(`已插入 ${line}`);
     };
   });
 }
@@ -3228,8 +3540,14 @@ function bind() {
   $("btnSettingsCancel").onclick = closeSettings;
   $("btnCompatMap").onclick = toggleMapEditor;
   $("btnAddAlias").onclick = addAliasFromForm;
+  // 换了渠道就重画模型候选，避免「渠道 A + 模型 B」这种不存在的组合
+  $("aliasChannel").onchange = () => renderAliasForm(state.compat?.channels || []);
   $("btnCompatMulti").onclick = toggleMultiMapEditor;
   $("btnAddMulti").onclick = addMultiAliasFromForm;
+  // 模型路由引导：① 点客户端名一键配好，② 输入模型名即时验算
+  $("btnRouteClaude").onclick = () => applyClientPreset("claude");
+  $("btnRouteCodex").onclick = () => applyClientPreset("codex");
+  $("routeProbe").oninput = renderRouteProbe;
   // 自定义渠道：入口在账号管理页（不是设置里）。添加/删除都在独立弹层里完成。
   $("btnAddCustomChannelEntry").onclick = openCustomChannelModal;
   // 配置生成器是独立静态页（同一份 go:embed 资源），新窗口打开便于对照填写。

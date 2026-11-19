@@ -220,6 +220,161 @@ globalThis.__DedupT([{ id: "2026-10-06-m1", title: "里程碑", body: "100分" }
 globalThis.__DedupT([{ id: "2026-10-06-m1", title: "里程碑", body: "100分" }]);
 check("里程碑 toast 同 id 去重（只写一次已读标记）", toastWrites === 1, `实际写入 ${toastWrites} 次`);
 
+// ---- 场景 7：模型路由「一键配好 + 即时验算」（2026-11-19） ----
+// 锁两条曾经的硬伤：
+//   ① 写死的预设模型名会随上游下线过期（workbuddy/kimi-k2.7、glm/chatglm 都已不存在），
+//      用户点预设反而配出一条必然失败的规则 → 现在必须从 fees 实时清单里挑；
+//   ② state.fees 从未被赋值，导致「模型名」下拉候选永远是空 → 现在必须有候选。
+const ROUTE_FEES = {
+  channels: [
+    {
+      channel: "workbuddy", models: [
+        { model: "hy4flash-free", rate: 0, priced: true, free: true, exhausted: false, supports_tools: true },
+        { model: "glm-5.3-flash", rate: 0.08, priced: true, free: false, exhausted: false, supports_tools: true },
+        { model: "glm-5.3", rate: 0.69, priced: true, free: false, exhausted: false, supports_tools: true },
+        { model: "kimi-k3.1-pro", rate: 0.97, priced: true, free: false, exhausted: false, supports_tools: true },
+        { model: "gpt-6-astra", rate: 6.67, priced: true, free: false, exhausted: false, supports_tools: true },
+      ],
+    },
+    {
+      // 该渠道全部不支持工具调用 → 一个都不该进候选池
+      channel: "qodercn", models: [
+        { model: "glm-5.3", rate: 0.8, priced: true, free: false, exhausted: false, supports_tools: false },
+      ],
+    },
+    {
+      channel: "raccoon", models: [
+        // 免费但今日额度已用尽 → 必须排到最后，否则配完立刻报「额度不足」
+        { model: "sn-sensenova-6-8-flash", rate: 0, priced: true, free: true, exhausted: true, supports_tools: true },
+        { model: "sn-glm-5-3-flash", rate: 0.2, priced: true, free: false, exhausted: false, supports_tools: true },
+      ],
+    },
+    {
+      // 非对话模型：即使标了 supports_tools 也不能当主力
+      channel: "workbuddyai", models: [
+        { model: "computer_use_subagent", rate: 0.1, priced: true, free: false, exhausted: false, supports_tools: true },
+        { model: "glm-5.2_advisor_doubao", rate: 0.1, priced: true, free: false, exhausted: false, supports_tools: true },
+      ],
+    },
+  ],
+};
+const ROUTE_STATE = {
+  compat: { channels: ["workbuddy", "qodercn", "raccoon", "workbuddyai"], model_map: {}, custom_models: {} },
+  fees: ROUTE_FEES,
+  accounts: [],
+  version: "test",
+};
+const rnodes = {};
+const rDoc = {
+  getElementById: (id) => (rnodes[id] ||= {
+    id, innerHTML: "", textContent: "", value: "", style: {},
+    classList: {
+      _s: new Set(),
+      add(c) { this._s.add(c); }, remove(c) { this._s.delete(c); }, contains(c) { return this._s.has(c); },
+    },
+    // 真实节点也有 querySelectorAll（renderMapPresets 用它给插入按钮绑事件），stub 不能漏
+    querySelectorAll: () => [],
+    scrollTop: 0, scrollHeight: 0, clientHeight: 0,
+  }),
+  querySelectorAll: () => [],
+  addEventListener: () => {},
+  createElement: () => rDoc.getElementById("route-stub"),
+  body: { appendChild: () => {} },
+};
+const routeCalls = [];
+const routeFetch = async (path, opts) => {
+  routeCalls.push({ path, body: opts?.body ? JSON.parse(opts.body) : null });
+  return { ok: true, json: async () => ({}) };
+};
+const rPatched = raw.replace(/let state = null;/, "let state = " + JSON.stringify(ROUTE_STATE) + ";")
+  + "\n; globalThis.__R = { routePool, pickRouteModels, CLIENT_ENTRIES, applyClientPreset, probeRoute, rateLabel, renderMapPresets, getState: () => state };";
+new Function("document", "window", "localStorage", "fetch", "location", "navigator", rPatched)(
+  rDoc, window, { getItem: () => null, setItem: () => {} },
+  routeFetch, { search: "" }, { userAgent: "node" });
+const R = globalThis.__R;
+
+// 候选池：过滤口径
+const pool = R.routePool();
+check("候选池排除「不支持工具调用」的渠道", !pool.some((r) => r.channel === "qodercn"),
+  `池内有 qodercn: ${pool.filter((r) => r.channel === "qodercn").length}`);
+check("候选池排除非对话模型（computer_use / advisor）",
+  !pool.some((r) => /computer_use|advisor/.test(r.model)));
+check("排序：免费且还有额度的排第一",
+  pool[0].channel === "workbuddy" && pool[0].model === "hy4flash-free",
+  `实际首位 ${pool[0]?.channel}/${pool[0]?.model}`);
+const iExhausted = pool.findIndex((r) => r.model === "sn-sensenova-6-8-flash");
+const iPaid = pool.findIndex((r) => r.model === "sn-glm-5-3-flash");
+check("额度已用尽的免费模型排在付费模型之后", iExhausted > iPaid, `exhausted=${iExhausted} paid=${iPaid}`);
+
+// 主力 / 强档选择
+const picked = R.pickRouteModels();
+check("主力跳过免费模型（免费额度被限流不会自愈）", picked.main.model === "glm-5.3-flash",
+  `实际 ${picked.main.channel}/${picked.main.model}`);
+check("主力取 ≥0.05x 里最便宜的付费模型", picked.main.rate === 0.08 && !picked.main.free,
+  `rate=${picked.main.rate} free=${picked.main.free}`);
+check("强档倍率落在 0.3~1.5", picked.strong && picked.strong.rate >= 0.3 && picked.strong.rate <= 1.5,
+  `实际 ${picked.strong?.rate}`);
+check("强档不会选 6.67x 旗舰", picked.strong.model !== "gpt-6-astra");
+
+// 映射生成
+const claudeEntries = R.CLIENT_ENTRIES.claude.build(picked);
+check("Claude Code 生成 claude-* 通配", claudeEntries.some(([k]) => k === "claude-*"));
+check("Claude Code 生成 claude-opus-* 强档", claudeEntries.some(([k]) => k === "claude-opus-*"));
+const codexEntries = R.CLIENT_ENTRIES.codex.build(picked);
+check("Codex 同时覆盖 gpt-* 与 codex-*",
+  codexEntries.some(([k]) => k === "gpt-*") && codexEntries.some(([k]) => k === "codex-*"));
+
+// 验算：没配映射时，claude-sonnet-4-5 必须判为「不通」（这就是用户配之前的真实状态）
+const before = R.probeRoute("claude-sonnet-4-5-20250929");
+check("未配映射时 claude-* 判为不通", before && before.ok === false, JSON.stringify(before));
+
+// 一键配置（真实提交 /api/config/compat）
+await R.applyClientPreset("claude");
+const compat = routeCalls.find((c) => c.path === "/api/config/compat");
+check("一键配置提交到 /api/config/compat", !!compat);
+check("一键配置把兜底切成 auto", compat?.body?.default_channel === "auto");
+check("一键配置写入 claude-*", compat?.body?.model_map?.["claude-*"] === "workbuddy/glm-5.3-flash",
+  String(compat?.body?.model_map?.["claude-*"]));
+check("一键配置写入 claude-opus-*", compat?.body?.model_map?.["claude-opus-*"] === "workbuddy/kimi-k3.1-pro",
+  String(compat?.body?.model_map?.["claude-opus-*"]));
+check("提交的模型名来自实时清单（不含已过期的 kimi-k2.7）",
+  !JSON.stringify(compat?.body?.model_map || {}).includes("kimi-k2.7"));
+check("结果区给出「已生效」结论", /已生效/.test(rnodes["routeResult"]?.innerHTML || ""));
+
+// 配好之后，同一个名字必须能验算通过
+const after = R.probeRoute("claude-sonnet-4-5-20250929");
+check("配好后 claude-* 验算通过", after && after.ok === true, JSON.stringify(after));
+check("Opus 走强档（最长通配优先）",
+  R.probeRoute("claude-opus-4-1").target === "workbuddy/kimi-k3.1-pro",
+  R.probeRoute("claude-opus-4-1").target);
+
+// 不覆盖用户已有规则
+rnodes["mapText"].value = "claude-* = workbuddy/glm-5.3";
+routeCalls.length = 0;
+await R.applyClientPreset("claude");
+const compat2 = routeCalls.find((c) => c.path === "/api/config/compat");
+check("一键配置不覆盖已有同名规则",
+  compat2?.body?.model_map?.["claude-*"] === "workbuddy/glm-5.3",
+  String(compat2?.body?.model_map?.["claude-*"]));
+
+// 与「一个名字挂多个模型」同名时跳过（后端不允许两边共用同一名字，硬写会 400）
+R.getState().compat.model_map = {};
+R.getState().compat.custom_models = { "claude-*": ["workbuddy/glm-5.3"] };
+rnodes["mapText"].value = "";
+routeCalls.length = 0;
+await R.applyClientPreset("claude");
+const compat3 = routeCalls.find((c) => c.path === "/api/config/compat");
+check("与多候选同名时不写入 model_map", !compat3?.body?.model_map?.["claude-*"],
+  JSON.stringify(compat3?.body?.model_map));
+check("跳过时给出说明（不静默丢弃）", /跳过/.test(rnodes["routeResult"]?.innerHTML || ""));
+
+// 快速别名按渠道生成、互不冲突
+R.renderMapPresets(["workbuddy", "raccoon"]);
+const presetHtml = rnodes["mapPresets"].innerHTML;
+check("快捷别名按渠道生成（workbuddy-cheap / raccoon-cheap）",
+  presetHtml.includes("workbuddy-cheap") && presetHtml.includes("raccoon-cheap"));
+check("快捷别名指向真实模型（该渠道最便宜的，可以是免费）", presetHtml.includes("workbuddy/hy4flash-free"));
+
 // ---- 静态结构断言：index.html / style.css 的 stats 骨架 ----
 const html = readFileSync(new URL("../cmd/workbuddy-api/web/index.html", import.meta.url), "utf8");
 check('第三个 tab 按钮存在（data-mtab="stats"）', /data-mtab="stats"/.test(html));
