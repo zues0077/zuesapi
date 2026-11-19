@@ -6,8 +6,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"workbuddy-api/internal/auth"
+	"workbuddy-api/internal/config"
+	"workbuddy-api/internal/pool"
+	"workbuddy-api/internal/provider"
 )
 
 // TestLoginCookieIsPersistent 登录必须下发**持久** cookie：
@@ -145,5 +151,110 @@ func TestSessionFileStoresHashOnly(t *testing.T) {
 	}
 	if _, ok := d.Sessions[tokHash(tok)]; !ok {
 		t.Error("落盘应以 tokenHash 为键")
+	}
+}
+
+// newPanelAppAt 在指定目录构造面板 App，用于模拟「同一台机器上的两次进程启动」。
+func newPanelAppAt(t *testing.T, dir, listenHost, adminPass string) *App {
+	t.Helper()
+	cfg := config.Default()
+	cfg.StateFile = filepath.Join(dir, "state.json")
+	cfg.AuthDir = dir
+	cfg.Listen = config.Listen{Host: listenHost, Port: 7863}
+	cfg.AdminPass = adminPass
+
+	p := pool.New(filepath.Join(dir, "state-workbuddy.json"))
+	p.Add(&auth.Auth{Kind: "workbuddy", UID: "wb-1", AccessToken: "t", RefreshToken: "r"})
+	a, err := New(Options{
+		ConfigPath: filepath.Join(dir, "config.json"),
+		Config:     cfg,
+		Runtimes: map[provider.Kind]*Runtime{
+			provider.WorkBuddy: {Kind: provider.WorkBuddy, Pool: p, Upstream: &fakeUpstream{remain: 10}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return a
+}
+
+// TestPanelSessionSurvivesAppRestart 端到端覆盖用户场景：
+// 登录 → 进程重启（同一数据目录）→ 同一浏览器 cookie 仍有效；
+// 再改管理密码 → 同一 cookie 必须立即失效（安全边界不能被持久化削弱）。
+func TestPanelSessionSurvivesAppRestart(t *testing.T) {
+	dir := t.TempDir()
+
+	a1 := newPanelAppAt(t, dir, "0.0.0.0", "s3cret-pass")
+	w := doReq(panelMux(a1), "POST", "/api/auth/login", `{"password":"s3cret-pass"}`, nil)
+	if w.Code != 200 {
+		t.Fatalf("登录应 200，实际 %d", w.Code)
+	}
+	var ck *http.Cookie
+	for _, c := range w.Result().Cookies() {
+		if c.Name == sessionCookie {
+			ck = c
+		}
+	}
+	if ck == nil {
+		t.Fatal("登录未下发会话 cookie")
+	}
+	if _, err := os.Stat(filepath.Join(dir, sessionFile)); err != nil {
+		t.Fatalf("会话表应落盘到 %s: %v", sessionFile, err)
+	}
+	a1.Close() // 模拟进程退出
+
+	a2 := newPanelAppAt(t, dir, "0.0.0.0", "s3cret-pass")
+	defer a2.Close()
+	if got := doReq(panelMux(a2), "GET", "/api/state", "", ck).Code; got != 200 {
+		t.Fatalf("重启后同一 cookie 应仍然有效，实际 %d", got)
+	}
+
+	// 改密码后旧会话必须失效（即使磁盘上还留着该条目）
+	a3 := newPanelAppAt(t, dir, "0.0.0.0", "another-pass-9")
+	defer a3.Close()
+	if got := doReq(panelMux(a3), "GET", "/api/state", "", ck).Code; got != 401 {
+		t.Fatalf("改密码后旧 cookie 应 401，实际 %d", got)
+	}
+}
+
+// TestCorruptSessionFileIgnored 会话表损坏不得影响启动，最多要求重新登录。
+func TestCorruptSessionFileIgnored(t *testing.T) {
+	fp := filepath.Join(t.TempDir(), sessionFile)
+	if err := os.WriteFile(fp, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := newAuthState()
+	s.bind(fp) // 不应 panic
+	if len(s.sessions) != 0 {
+		t.Errorf("损坏文件不应恢复出会话，实际 %d 条", len(s.sessions))
+	}
+	// 损坏后仍应能正常签发新会话并覆盖文件
+	tok := s.issue("b")
+	if !s.valid(tok, "b") {
+		t.Error("损坏文件后的新会话应正常可用")
+	}
+}
+
+// TestConcurrentIssueAndValid 并发签发/校验不丢会话（配合 -race 可验数据竞争）。
+func TestConcurrentIssueAndValid(t *testing.T) {
+	s := newAuthState()
+	s.bind(filepath.Join(t.TempDir(), sessionFile))
+
+	const n = 50
+	toks := make([]string, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			toks[i] = s.issue("b")
+		}(i)
+	}
+	wg.Wait()
+
+	for i, tk := range toks {
+		if !s.valid(tk, "b") {
+			t.Errorf("并发签发的第 %d 个会话应有效", i)
+		}
 	}
 }
