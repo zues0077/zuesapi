@@ -23,6 +23,10 @@ func (g *Gateway) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	}
 	model := asString(body["model"])
 
+	// 自动别名（deva-main/deva-free 等）的 max_tokens 下限兜底：思考模型过小会正文空。
+	// 必须在 resolveModel 之前用原始别名判断，且 body 会原样透传给内层，直接改 body 即可。
+	g.applyAliasFloor(body, model)
+
 	// 先判断是否多候选别名：是则直接用原始别名解析 + 注入完整候选阵列。
 	candidates := g.candidatesFromBody(model)
 	if len(candidates) > 0 {

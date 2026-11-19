@@ -44,6 +44,9 @@ func (g *Gateway) handleResponses(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// 自动别名兜底：responses 的三个 max_tokens 键按官方优先级取第一个有效值抬高，
+	// 与 responsesToChat 内的取值顺序一致，随后 clamp 上限。
+	g.applyAliasFloor(body, model, "max_output_tokens", "max_completion_tokens", "max_tokens")
 	stream := asBool(body["stream"])
 
 	req, err := responsesToChat(body, resolved, g.maxTokensCap)

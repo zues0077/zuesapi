@@ -58,7 +58,7 @@ import (
 // （cmd/workbuddy-api/rsrc_windows_amd64.syso，由 build/make_syso.py 从
 // icon.ico 生成）也带版本号，须重新生成 —— 见 build/ICON_README.md。
 // 否则文件属性里显示的还是旧版本，与面板显示不一致。
-const Version = "0.1.17"
+const Version = "0.1.18"
 
 const (
 	loginTimeout   = 5 * time.Minute
@@ -126,7 +126,7 @@ type App struct {
 
 	// compatSyncer 面板保存 compat 后同步给外层兼容层（热更新路由表）。
 	// 由 main.go 注入；nil 时仅写配置不热更（下次启动生效）。
-	compatSyncer func(defaultChannel string, maxTokensCap int, modelMap map[string]string, customModels map[string][]string)
+	compatSyncer func(defaultChannel string, maxTokensCap int, modelMap map[string]string, customModels map[string][]string, autoAliases map[string]config.AutoAliasSpec)
 
 	// proxySyncer 面板保存 proxies 后重新套各渠道 HTTP client（热更新代理）。
 	// 由 main.go 注入；nil 时仅写配置不热更。
@@ -2023,7 +2023,7 @@ func (a *App) SetCompat(defaultChannel string, maxTokensCap int, modelMap map[st
 	}
 	// 热更新外层兼容层的路由表：不同步的话新映射要重启才生效。
 	if a.compatSyncer != nil {
-		a.compatSyncer(defaultChannel, maxTokensCap, modelMap, customModels)
+		a.compatSyncer(defaultChannel, maxTokensCap, modelMap, customModels, autoAliases)
 	}
 	log.Printf("模型名路由配置已更新：default_channel=%q max_tokens_cap=%d model_map=%d 条 "+
 		"custom_models=%d 条",
@@ -2099,9 +2099,10 @@ func rateOfModel(channelModel string, modelRate func(kind provider.Kind, model s
 }
 
 // SetCompatSyncer 注入 compat 热更新回调（由 main.go 注入，指向 gateway.SetCompat）。
-// 参数多了 customModels：它是自定义多候选（alias → 候选阵列），热更新时会同时下发。
+// customModels 是自定义多候选（alias → 候选阵列）；autoAliases 标记哪些别名由系统自动管理，
+// 两者热更新时一起下发，供网关对自动别名做 max_tokens 下限兜底。
 func (a *App) SetCompatSyncer(fn func(defaultChannel string, maxTokensCap int,
-	modelMap map[string]string, customModels map[string][]string)) {
+	modelMap map[string]string, customModels map[string][]string, autoAliases map[string]config.AutoAliasSpec)) {
 	a.compatSyncer = fn
 }
 

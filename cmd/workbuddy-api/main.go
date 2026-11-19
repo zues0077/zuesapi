@@ -624,6 +624,15 @@ func main() {
 	for k := range runtimes {
 		channels = append(channels, k.String())
 	}
+	// autoAliasNameSet 把系统自动生成的别名映射转成名字集合，供网关识别哪些名字要做
+	// max_tokens 下限兜底。只看 key（别名本身），值（group/generated）与兜底无关。
+	autoAliasNameSet := func(m map[string]config.AutoAliasSpec) map[string]bool {
+		out := make(map[string]bool, len(m))
+		for name := range m {
+			out[name] = true
+		}
+		return out
+	}
 	compat := gateway.New(gateway.Config{
 		Inner:  inner,
 		APIKey: cfg.APIKey,
@@ -633,14 +642,17 @@ func main() {
 			CustomModels: cfg.Compat.CustomModels,
 			Channels:     gateway.SortChannels(channels),
 		},
-		MaxTokensCap: cfg.Compat.MaxTokensCap,
+		MaxTokensCap:   cfg.Compat.MaxTokensCap,
+		AliasMinTokens: gateway.AliasMinTokensFloor,
+		AutoAliases:    autoAliasNameSet(cfg.Compat.AutoAliases),
 	})
 	// default_channel == "auto" 时，按模型在所有已接入渠道中自动选（免费/低费率优先）。
 	compat.SetLookup(appInst.ModelRouteHits)
 	// 面板保存 compat 时热更新兼容层路由表（不然新映射要重启才生效）
 	appInst.SetCompatSyncer(func(defaultChannel string, maxTokensCap int, modelMap map[string]string,
-		customModels map[string][]string) {
-		compat.SetCompat(defaultChannel, maxTokensCap, modelMap, customModels, channels)
+		customModels map[string][]string, autoAliases map[string]config.AutoAliasSpec) {
+		compat.SetCompat(defaultChannel, maxTokensCap, modelMap, customModels, channels,
+			gateway.AliasMinTokensFloor, autoAliasNameSet(autoAliases))
 	})
 	// 面板保存代理配置时热更新各渠道 HTTP client（重建 Transport，无需重启）。
 	// 表必须与启动路径同源 —— 见 proxyClientMap 的注释。

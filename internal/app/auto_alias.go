@@ -129,7 +129,7 @@ func (a *App) recomputeAutoAliases() {
 	a.mu.Unlock()
 
 	if changed && a.compatSyncer != nil {
-		a.compatSyncer(defCh, cap, mm, nextModels)
+		a.compatSyncer(defCh, cap, mm, nextModels, nextSpecs)
 	}
 }
 

@@ -32,7 +32,18 @@ type Config struct {
 	// MaxTokensCap 上游 max_tokens 上限（0 = 不限制）。
 	// Anthropic 客户端的 max_tokens 常远大于上游接受值，需在转发前 clamp。
 	MaxTokensCap int
+	// AliasMinTokens 自动别名（deva-main/deva-free 等）的 max_tokens 下限。
+	// thinking 模型思考会吃掉 token，过小（32/64）导致正文空；对这些别名兜底到下限。
+	// 0 = 不启用兜底；只作用于 AutoAliases 登记的别名，普通模型/其他别名不受影响。
+	AliasMinTokens int
+	// AutoAliases 由系统自动优选生成的别名集合（值无意义，只看 key 是否登记）。
+	AutoAliases map[string]bool
 }
+
+// AliasMinTokensFloor 自动别名的 max_tokens 下限。thinking 模型思考会吃 token，
+// 实测 32/64 有 64%~100% 概率正文空（见 docs/experiments/max-tokens-256-ab-20261119），
+// 256 实测两档全过。只作用于 AutoAliases 登记的别名。
+const AliasMinTokensFloor = 256
 
 // SystemOneHandler 是 systemone 端点的实际处理函数。
 // 签名为 func(w, r, state, questions)。网关负责鉴权、解析 body 后调用。
@@ -41,14 +52,16 @@ type SystemOneHandler func(w http.ResponseWriter, r *http.Request, state string,
 
 // Gateway 三接口兼容层。零值不可用，须经 New 构造。
 type Gateway struct {
-	inner        http.Handler
-	apiKey       string
-	apiKeySource func() string // 非 nil 时优先于 apiKey（面板热改 Key 后立即跟随）
-	router       Router
-	maxTokensCap int
-	sysone       SystemOneHandler // 非 nil 时注册 POST /v1/systemone
-	lookup       RouteLookup      // 自动选渠查询器；拷贝进 router，SetCompat 时保留
-	mu           sync.RWMutex     // 保护 router/maxTokensCap/lookup 热更新
+	inner          http.Handler
+	apiKey         string
+	apiKeySource   func() string // 非 nil 时优先于 apiKey（面板热改 Key 后立即跟随）
+	router         Router
+	maxTokensCap   int
+	aliasMinTokens int            // 自动别名 max_tokens 下限；0 = 不兜底
+	autoAliases    map[string]bool // 系统自动生成的别名集合
+	sysone         SystemOneHandler // 非 nil 时注册 POST /v1/systemone
+	lookup         RouteLookup      // 自动选渠查询器；拷贝进 router，SetCompat 时保留
+	mu             sync.RWMutex     // 保护 router/maxTokensCap/lookup 热更新
 }
 
 // New 构造兼容层。inner 为 nil 时返回 nil（调用方据此跳过兼容层，保持旧行为）。
@@ -57,10 +70,12 @@ func New(cfg Config) *Gateway {
 		return nil
 	}
 	return &Gateway{
-		inner:        cfg.Inner,
-		apiKey:       cfg.APIKey,
-		router:       cfg.Router,
-		maxTokensCap: cfg.MaxTokensCap,
+		inner:          cfg.Inner,
+		apiKey:         cfg.APIKey,
+		router:         cfg.Router,
+		maxTokensCap:   cfg.MaxTokensCap,
+		aliasMinTokens: cfg.AliasMinTokens,
+		autoAliases:    cfg.AutoAliases,
 	}
 }
 
@@ -98,11 +113,12 @@ func (g *Gateway) SetLookup(fn RouteLookup) {
 	g.mu.Unlock()
 }
 
-// SetCompat 热更新路由配置（default_channel / max_tokens_cap / model_map / custom_models）。
+// SetCompat 热更新路由配置（default_channel / max_tokens_cap / model_map / custom_models / 自动别名兜底）。
 // 面板保存 compat 时调用；不刷新的话新映射要到下次重启才生效。
 // channels 用于校验映射目标的渠道前缀，调用方应传入当前已接入渠道。
+// aliasMinTokens/autoAliases 控制自动别名的 max_tokens 下限兜底（0/nil = 不启用）。
 func (g *Gateway) SetCompat(defaultChannel string, maxTokensCap int, modelMap map[string]string,
-	customModels map[string][]string, channels []string) {
+	customModels map[string][]string, channels []string, aliasMinTokens int, autoAliases map[string]bool) {
 	if g == nil {
 		return
 	}
@@ -115,7 +131,49 @@ func (g *Gateway) SetCompat(defaultChannel string, maxTokensCap int, modelMap ma
 		Lookup:       g.lookup,
 	}
 	g.maxTokensCap = maxTokensCap
+	g.aliasMinTokens = aliasMinTokens
+	g.autoAliases = autoAliases
 	g.mu.Unlock()
+}
+
+// aliasFloor 返回该模型名需要的 max_tokens 下限；0 表示不兜底。
+// 只对登记在 autoAliases 里的名字生效（系统自动生成的别名），普通模型/用户自定义别名一律返回 0。
+func (g *Gateway) aliasFloor(model string) int {
+	if g == nil || g.aliasMinTokens <= 0 || len(g.autoAliases) == 0 {
+		return 0
+	}
+	g.mu.RLock()
+	registered := g.autoAliases[model]
+	floor := g.aliasMinTokens
+	g.mu.RUnlock()
+	if !registered {
+		return 0
+	}
+	return floor
+}
+
+// applyAliasFloor 对自动别名兜底 max_tokens 下限。
+// 语义：请求值 < 下限则抬到下限；>= 下限（含缺失交给上游默认的情况）不动。
+// 上限封顶由各协议转换函数单独处理（先抬下限、再封顶，不冲突）。
+// keys 为要检查的 max_tokens 键名（chat/messages 传 "max_tokens"；
+// responses 按官方优先级传 "max_output_tokens","max_completion_tokens","max_tokens"）。
+// 只抬高第一个有效键，与 responsesToChat 的取值优先级一致。
+func (g *Gateway) applyAliasFloor(body map[string]any, model string, keys ...string) {
+	floor := g.aliasFloor(model)
+	if floor <= 0 {
+		return
+	}
+	if len(keys) == 0 {
+		keys = []string{"max_tokens"}
+	}
+	for _, k := range keys {
+		if n, has := asInt(body[k]); has && n > 0 {
+			if n < floor {
+				body[k] = floor
+			}
+			return // 只处理第一个有效键，与下游转换取值一致
+		}
+	}
 }
 
 // key 返回当前生效的 API Key。

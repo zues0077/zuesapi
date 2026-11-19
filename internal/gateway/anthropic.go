@@ -32,6 +32,8 @@ func (g *Gateway) anthropicMessages(w http.ResponseWriter, r *http.Request, body
 	if n, has := asInt(body["max_tokens"]); !has || n <= 0 {
 		body["max_tokens"] = 4096
 	}
+	// 自动别名兜底：显式传的小值（如 32/64）抬到下限；缺失已被上面设为 4096，不受影响。
+	g.applyAliasFloor(body, model)
 
 	req, err := anthropicToChat(body, resolved, g.maxTokensCap)
 	if err != nil {
