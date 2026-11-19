@@ -49,7 +49,9 @@ const (
 	// keepMonths 流水分段保留月数（启动时清理更早的分段）。
 	keepMonths = 1
 	// keepDays 单文件内条目保留天数（启动时裁剪更早的)。
-	keepDays = 7
+	// 取 30 与 keepMonths=1（保留当月+上月）大致对齐：月内不再提前砍成 7 天，
+	// 面板只暴露今日/7日两档（Query 里 days!=1 会钳到 7），保留更多只为留档与排障。
+	keepDays = 30
 )
 
 // Ledger 双流水记账器。goroutine 安全。
@@ -109,8 +111,10 @@ func (l *Ledger) trimCurrentMonth() {
 		if err != nil {
 			continue
 		}
-		// 快速路径：首行时间戳已 ≤ cutTs，无需裁剪
-		if idx := findLineTs(raw); idx >= 0 && idx <= cutTs {
+		// 快速路径：首行（最老一条）在边界之后 → 整个文件都在保留窗口内，无需裁剪。
+		// 注意方向：首行 <= cutTs 说明文件里确有超期条目，必须往下走裁剪；写成 <= continue
+		// 会让有序文件永远跳过裁剪（2026-11-19 实测：863 行里 459 行超 7 天却一行没删）。
+		if idx := findLineTs(raw); idx >= 0 && idx > cutTs {
 			continue
 		}
 		// 双指针原地过滤（避免分配临时数组）
@@ -125,7 +129,8 @@ func (l *Ledger) trimCurrentMonth() {
 			}
 			// 取时间戳：json {"ts":1790144604,...}
 			ts := parseTs(line)
-			if ts >= cutTs {
+			// ts==0 = 取不到时间戳（格式异常/字段缺失）：保守保留，绝不因解析失败清空文件
+			if ts == 0 || ts >= cutTs {
 				keep = append(keep, line...)
 				keep = append(keep, '\n')
 			}
