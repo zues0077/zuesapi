@@ -5,8 +5,12 @@
 //   - 写入侧：内存仅一个带缓冲句柄，掉 API 时 append 一行 JSONL，O(1) 无聚合状态。
 //   - 读取侧：仅在 Web UI 请求 /api/usage 时一次性读文件聚合，边扫边聚合不保留原始行。
 //   - 文件按月分段（usage-YYYYMM.jsonl / credit-YYYYMM.jsonl），单文件天然有界；
-//     默认保留 6 个月，启动时清理更早的分段。个人工具量级（~1.5MB/月）下
-//     单次聚合扫描 ≤2 个月分段 ≈ 毫秒级；若未来量级上涨可再加 rollup 偏移续扫。
+//     保留窗口由 keepMonths 决定：整月删除，保留「上月 + 当月」，跨度 29~62 天。
+//     不做文件内按天裁剪——曾有的 keepDays 滑窗只作用于当月分段，而当月最老条目
+//     （本月 1 号）永远晚于「今天 - keepDays」，实际是永不生效的空操作（2026-11-19
+//     量测后移除，30 与 60 结果逐行相同）。个人工具量级（credit ~140KB/月、
+//     usage ~22KB/月）下单次聚合扫描 ≤2 个月分段 ≈ 毫秒级；若未来量级上涨可再加
+//     rollup 偏移续扫。
 //   - 流水只含 uid/模型名/token 数量，绝不含 access/refresh token（§6-2 红线）。
 package ledger
 
@@ -46,12 +50,11 @@ type CreditEntry struct {
 }
 
 const (
-	// keepMonths 流水分段保留月数（启动时清理更早的分段）。
+	// keepMonths 流水分段保留月数（启动时清理更早的整月分段）。
+	// 这是保留窗口的唯一开关：keepMonths=1 → 保留「上月 + 当月」两本，
+	// 实际跨度 29~62 天（3/1 遇 2 月最短，月末最长）。
+	// 面板只暴露今日/7日两档（Query 里 days!=1 会钳到 7），更多数据只为留档与排障。
 	keepMonths = 1
-	// keepDays 单文件内条目保留天数（启动时裁剪更早的)。
-	// 取 30 与 keepMonths=1（保留当月+上月）大致对齐：月内不再提前砍成 7 天，
-	// 面板只暴露今日/7日两档（Query 里 days!=1 会钳到 7），保留更多只为留档与排障。
-	keepDays = 30
 )
 
 // Ledger 双流水记账器。goroutine 安全。
@@ -75,7 +78,6 @@ func New(dir string) (*Ledger, error) {
 	l := &Ledger{dir: dir}
 	l.migrateDupKeyCredit() // 一次性：归档旧版重复 key 差分错误流水（issue #38）
 	l.cleanup()
-	l.trimCurrentMonth() // 裁剪当月文件内 7 天前条目
 	return l, nil
 }
 
@@ -101,110 +103,13 @@ func (l *Ledger) cleanup() {
 	}
 }
 
-// trimCurrentMonth 裁剪当月文件内 7 天前的条目：一行行扫一遍，只保留 cutTs 之后的。
-// 日常 150 行/天的量级下走重写方式即可，无需 mmap 或 seek 优化。
-func (l *Ledger) trimCurrentMonth() {
-	cutTs := time.Now().AddDate(0, 0, -keepDays).Unix()
-	for _, prefix := range []string{"usage", "credit"} {
-		fp := filepath.Join(l.dir, monthFile(prefix, time.Now()))
-		raw, err := os.ReadFile(fp)
-		if err != nil {
-			continue
-		}
-		// 快速路径：首行（最老一条）在边界之后 → 整个文件都在保留窗口内，无需裁剪。
-		// 注意方向：首行 <= cutTs 说明文件里确有超期条目，必须往下走裁剪；写成 <= continue
-		// 会让有序文件永远跳过裁剪（2026-11-19 实测：863 行里 459 行超 7 天却一行没删）。
-		if idx := findLineTs(raw); idx >= 0 && idx > cutTs {
-			continue
-		}
-		// 双指针原地过滤（避免分配临时数组）
-		keep := raw[:0]
-		for len(raw) > 0 {
-			nl := indexByte(raw, '\n')
-			line := raw
-			if nl >= 0 {
-				line, raw = raw[:nl], raw[nl+1:]
-			} else {
-				raw = nil
-			}
-			// 取时间戳：json {"ts":1790144604,...}
-			ts := parseTs(line)
-			// ts==0 = 取不到时间戳（格式异常/字段缺失）：保守保留，绝不因解析失败清空文件
-			if ts == 0 || ts >= cutTs {
-				keep = append(keep, line...)
-				keep = append(keep, '\n')
-			}
-		}
-		_ = os.WriteFile(fp, keep, 0o600)
-	}
-}
+// 关于「文件内按天裁剪」：曾有一版 trimCurrentMonth 想去掉 N 天前的条目，但它只读
+// 当月分段（monthFile(prefix, time.Now())），而当月最老的条目（本月 1 号）永远晚于
+// 「今天 - keepDays」（keepDays ≥ 当月天数），快速路径每次命中 → 一行都裁不掉。
+// 30 与 60 的量测结果逐行相同，已无保留价值。
+// 保留窗口统一交给 cleanup() 的整月分段策略，此处不再按天裁剪。
 
-// findLineTs 取 JSONL 文件首行时间戳（用于快速路径判断）。
-// 首行 → 裁剪边界说明全部待裁剪；首行在边界后说明全部保留。
-func findLineTs(raw []byte) int64 {
-	nl := indexByte(raw, '\n')
-	if nl < 0 {
-		nl = len(raw)
-	}
-	return parseTs(raw[:nl])
-}
-
-// parseTs 从 JSONL 行头提取 \"ts\": 后的整数（无 jq 依赖，纯字节扫描）。
-// 不成功返回 0（保守保留）。
-func parseTs(line []byte) int64 {
-	// 找 "ts":
-	const needle = `"ts":`
-	idx := indexBytes(line, []byte(needle))
-	if idx < 0 {
-		return 0
-	}
-	// 跳过空白和冒号后的空白
-	b := line[idx+len(needle):]
-	for len(b) > 0 && (b[0] == ' ' || b[0] == '\t') {
-		b = b[1:]
-	}
-	var v int64
-	for len(b) > 0 && b[0] >= '0' && b[0] <= '9' {
-		v = v*10 + int64(b[0]-'0')
-		b = b[1:]
-	}
-	return v
-}
-
-// indexByte 返回字节切片中目标字节首次出现的索引，未找到返回 -1。
-func indexByte(s []byte, c byte) int {
-	for i, b := range s {
-		if b == c {
-			return i
-		}
-	}
-	return -1
-}
-
-// indexBytes 返回字节切片中子串首次出现的索引，未找到返回 -1。
-func indexBytes(s, sub []byte) int {
-	if len(sub) == 0 {
-		return 0
-	}
-	if len(sub) > len(s) {
-		return -1
-	}
-	for i := 0; i <= len(s)-len(sub); i++ {
-		match := true
-		for j := 0; j < len(sub); j++ {
-			if s[i+j] != sub[j] {
-				match = false
-				break
-			}
-		}
-		if match {
-			return i
-		}
-	}
-	return -1
-}
-
-// monthSegment 当前（或指定时间）月份的分段文件名。
+// monthFile 当前（或指定时间）月份的分段文件名。
 func monthFile(prefix string, t time.Time) string {
 	return fmt.Sprintf("%s-%s.jsonl", prefix, t.Format("200601"))
 }
